@@ -214,6 +214,7 @@ pub async fn upload(
     State(state): State<AppState>,
     user: AuthUser,
     Query(q): Query<UploadQuery>,
+    headers: HeaderMap,
     body: Body,
 ) -> ApiResult<(StatusCode, Json<Entry>)> {
     let path = paths::normalize_non_root(&q.path)?;
@@ -233,6 +234,14 @@ pub async fn upload(
     check_base_rev(existing.as_ref(), q.base_rev)?;
     let old_size = existing.as_ref().map(|e| e.size).unwrap_or(0);
     let allowed = quota - used + old_size;
+    // Größe vorab prüfen, wenn der Client sie mitschickt.
+    let declared = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<i64>().ok());
+    if declared.map(|n| n > allowed).unwrap_or(false) {
+        return Err(ApiError::QuotaExceeded);
+    }
 
     // In eine temporäre Datei streamen, dabei hashen und Größe prüfen.
     let tmp_path = state.tmp_dir().join(uuid::Uuid::new_v4().to_string());
