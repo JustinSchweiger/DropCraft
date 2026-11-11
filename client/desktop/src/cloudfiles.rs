@@ -14,7 +14,7 @@ use cloud_filter::{
     error::{CResult, CloudErrorKind},
     filter::{info, ticket, Request, SyncFilter},
     metadata::Metadata,
-    placeholder::{ConvertOptions, Placeholder, UpdateOptions},
+    placeholder::{ConvertOptions, PinOptions, PinState, Placeholder, UpdateOptions},
     placeholder_create_info::PlaceholderCreateInfo,
     root::{Connection, HydrationType, PopulationType, SecurityId, Session, SyncRootIdBuilder, SyncRootInfo},
     utility::WriteAt,
@@ -47,7 +47,15 @@ fn attrs(p: &Path) -> u32 {
 }
 
 fn io_err(e: impl std::fmt::Display) -> std::io::Error {
-    std::io::Error::other(e.to_string())
+    let text = e.to_string();
+    // Win32-Fehlercode aus "… (0x8007XXXX)" übernehmen, damit z. B.
+    // "Datei wird verwendet" (32) erkannt werden kann.
+    if let Some(i) = text.find("0x8007") {
+        if let Some(code) = text.get(i + 6..i + 10).and_then(|h| i32::from_str_radix(h, 16).ok()) {
+            return std::io::Error::from_raw_os_error(code);
+        }
+    }
+    std::io::Error::other(text)
 }
 
 fn file_time(ms: i64) -> FileTime {
@@ -140,9 +148,21 @@ impl LocalHooks for CloudHooks {
         Ok(true)
     }
 
+    fn hydrate(&self, l: &Path) -> std::io::Result<bool> {
+        // Blockiert, bis fetch_data (Provider) den ganzen Inhalt geliefert hat.
+        let mut ph = open_handle(l, false)?;
+        ph.hydrate(..).map_err(io_err)?;
+        Ok(true)
+    }
+
     fn free_space(&self, l: &Path) -> std::io::Result<()> {
         let mut ph = self.ensure_placeholder(l, true)?;
         ph.update(UpdateOptions::default().dehydrate().mark_in_sync(), None).map_err(io_err)?;
+        // Wie OneDrive: Nach dem Freigeben gilt die Datei wieder als „normal“.
+        // Sonst würde sie nach jedem Öffnen sofort wieder freigegeben.
+        if attrs(l) & ATTR_UNPINNED != 0 {
+            let _ = ph.mark_pin(PinState::Unspecified, PinOptions::default());
+        }
         Ok(())
     }
 
@@ -189,10 +209,15 @@ impl SyncFilter for Provider {
             return Err(CloudErrorKind::NotUnderSyncRoot);
         };
         let size = request.file_size();
-        let range = info.required_file_range();
+        let req = info.required_file_range();
+        let opt = info.optional_file_range();
+        // Volle Hydrierung: immer bis zum Dateiende liefern. Nur den
+        // geforderten Ausschnitt zu liefern führt bei Videos (Player,
+        // Vorschaubilder) zu ständig neuen Abrufen derselben Datei.
         // Windows verlangt 4-KiB-ausgerichtete Stücke (außer am Dateiende).
-        let start = range.start & !4095;
-        let end = ((range.end + 4095) & !4095).min(size);
+        let from = if opt.end > opt.start { req.start.min(opt.start) } else { req.start };
+        let start = from & !4095;
+        let end = size;
         if end <= start {
             return Ok(());
         }

@@ -570,6 +570,23 @@ impl SyncEngine {
                     deleted: false,
                     modified_by: None,
                 };
+                // Erst an Ort und Stelle füllen (Windows ruft dafür den Provider auf).
+                match self.hooks.hydrate(&local) {
+                    Ok(true) => {
+                        self.hooks.mark_synced(&local, false);
+                        if let Ok(m) = fs::metadata(&local) {
+                            self.state.put(&Synced { local_mtime: mtime_ms(&m), ..s.clone() })?;
+                        }
+                        self.event(EventKind::Downloaded, &s.path, human_size(s.size));
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(err) => {
+                        self.check_pause()?;
+                        self.event(EventKind::Error, &s.path, format!("Herunterladen: {err}"));
+                        continue;
+                    }
+                }
                 progress::enqueue(&self.progress, &s.path, false, s.size as u64);
                 let modified = fs::metadata(&local).ok().map(|m| mtime_ms(&m)).unwrap_or(0);
                 let res = self.download(&RemoteEntry { modified_at: modified, ..e }, &local);
@@ -588,7 +605,10 @@ impl SyncEngine {
                 let unchanged = fs::metadata(&local).map(|m| local_unchanged(&s, &m)).unwrap_or(false);
                 if unchanged {
                     if let Err(err) = self.hooks.free_space(&local) {
-                        self.event(EventKind::Error, &s.path, format!("Speicher freigeben: {err}"));
+                        // Datei gerade geöffnet (z. B. Video läuft): später erneut versuchen.
+                        if err.raw_os_error() != Some(32) {
+                            self.event(EventKind::Error, &s.path, format!("Speicher freigeben: {err}"));
+                        }
                     } else if let Ok(m) = fs::metadata(&local) {
                         self.state.put(&Synced { local_mtime: mtime_ms(&m), ..s.clone() })?;
                     }

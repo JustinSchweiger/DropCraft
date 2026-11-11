@@ -35,6 +35,13 @@ pub trait LocalHooks: Send {
         Ok(false)
     }
 
+    /// Lädt den Inhalt eines Platzhalters an Ort und Stelle (die Datei bleibt
+    /// dieselbe, Anpinnen bleibt erhalten). `Ok(false)`: nicht unterstützt,
+    /// die Engine lädt die Datei dann selbst und ersetzt sie.
+    fn hydrate(&self, _local: &Path) -> std::io::Result<bool> {
+        Ok(false)
+    }
+
     /// Gibt den Inhalt einer synchronen Datei frei (wird zum Platzhalter).
     fn free_space(&self, _local: &Path) -> std::io::Result<()> {
         Ok(())

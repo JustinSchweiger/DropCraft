@@ -274,6 +274,7 @@ pub async fn upload(
         return message_page(StatusCode::FORBIDDEN, "Upload nicht erlaubt", "Für diesen Link sind Uploads ausgeschaltet.");
     }
     let mut guest = String::new();
+    let device = device_label(headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or(""));
     let mut count = 0usize;
     loop {
         let field = match mp.next_field().await {
@@ -296,7 +297,7 @@ pub async fn upload(
                     Ok(t) => t,
                     Err(e) => return e.into_response(),
                 };
-                let by = if guest.is_empty() { "Gast (Link)".to_string() } else { format!("Gast: {guest}") };
+                let by = if guest.is_empty() { format!("Gast · {device}") } else { format!("Gast: {guest}") };
                 let res = files::store_file(&state, r.user_id, target, Box::pin(field), None, now_ms(), Some(0), &by).await;
                 match res {
                     Ok(_) => count += 1,
@@ -388,11 +389,12 @@ pub async fn page(State(state): State<AppState>, Path(token): Path<String>, Quer
 
         if r.allow_upload {
             body.push_str(&format!(
-                r#"<form class="upload" method="post" enctype="multipart/form-data" action="{base}/upload?p={}">
-<div class="up-title">{ICON_UPLOAD}<span>Dateien hinzufügen</span></div>
-<label class="field"><span>Dein Name (optional)</span><input type="text" name="name" maxlength="40" autocomplete="name"></label>
-<label class="field"><span>Dateien</span><input type="file" name="files" multiple required></label>
-<button class="btn primary" type="submit">Hochladen</button></form>"#,
+                r#"<form class="drop" id="drop" method="post" enctype="multipart/form-data" action="{base}/upload?p={}">
+<input id="pick" class="pick" type="file" name="files" multiple required>
+<label for="pick" class="drop-area">{ICON_UPLOAD_BIG}<span class="drop-main">Dateien hierher ziehen</span><span class="drop-sub">oder <u>auswählen</u></span></label>
+<div class="drop-progress" hidden><div class="drop-line"><span class="drop-status">Wird hochgeladen …</span><span class="drop-pct">0 %</span></div><div class="track"><div class="fill"></div></div></div>
+<noscript><button class="btn primary" type="submit">Hochladen</button></noscript>
+</form><script src="/assets/upload.js" defer></script>"#,
                 url_q(&r.rel)
             ));
         }
@@ -721,12 +723,86 @@ fn page_html(title: &str, main: &str) -> Response {
     h.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; media-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+            "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; media-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
         ),
     );
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
     h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     resp
+}
+
+/// Skript für Ziehen & Ablegen und Fortschritt (eigene Datei wegen CSP).
+const UPLOAD_JS: &str = r#"(function(){
+var f=document.getElementById('drop');if(!f)return;
+var pick=document.getElementById('pick'),prog=f.querySelector('.drop-progress'),st=f.querySelector('.drop-status'),pct=f.querySelector('.drop-pct'),fill=f.querySelector('.fill');
+function send(files){
+ if(!files||!files.length)return;
+ var d=new FormData();for(var i=0;i<files.length;i++)d.append('files',files[i],files[i].name);
+ f.classList.add('busy');prog.hidden=false;
+ st.textContent=files.length==1?files[0].name:files.length+' Dateien';
+ var x=new XMLHttpRequest();x.open('POST',f.action);
+ x.upload.onprogress=function(e){if(e.lengthComputable){var p=Math.floor(e.loaded*100/e.total);fill.style.width=p+'%';pct.textContent=p+' %';}};
+ x.onload=function(){if(x.status<400){fill.style.width='100%';pct.textContent='100 %';location.href=x.responseURL||location.href;}else fail(x.status==507?'Kein Platz mehr frei':'Upload fehlgeschlagen');};
+ x.onerror=function(){fail('Verbindung abgebrochen');};
+ x.send(d);
+}
+function fail(m){f.classList.add('failed');st.textContent=m;pct.textContent='';setTimeout(function(){f.classList.remove('busy','failed');prog.hidden=true;fill.style.width='0';},3500);}
+pick.addEventListener('change',function(){send(pick.files);});
+var n=0;
+document.addEventListener('dragenter',function(e){e.preventDefault();n++;f.classList.add('over');});
+document.addEventListener('dragleave',function(){if(--n<=0){n=0;f.classList.remove('over');}});
+document.addEventListener('dragover',function(e){e.preventDefault();});
+document.addEventListener('drop',function(e){e.preventDefault();n=0;f.classList.remove('over');if(e.dataTransfer)send(e.dataTransfer.files);});
+})();"#;
+
+pub async fn upload_js() -> Response {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8"), (header::CACHE_CONTROL, "public, max-age=3600")],
+        UPLOAD_JS,
+    )
+        .into_response()
+}
+
+/// Lesbare Gerätebezeichnung aus dem User-Agent, z. B. "iPhone · Safari".
+pub fn device_label(ua: &str) -> String {
+    let os = if ua.contains("iPhone") {
+        "iPhone"
+    } else if ua.contains("iPad") || (ua.contains("Macintosh") && ua.contains("Mobile")) {
+        "iPad"
+    } else if ua.contains("Android") {
+        if ua.contains("Mobile") { "Android-Handy" } else { "Android-Tablet" }
+    } else if ua.contains("Windows") {
+        "Windows-PC"
+    } else if ua.contains("Macintosh") || ua.contains("Mac OS X") {
+        "Mac"
+    } else if ua.contains("CrOS") {
+        "Chromebook"
+    } else if ua.contains("Linux") {
+        "Linux-PC"
+    } else {
+        ""
+    };
+    let browser = if ua.contains("Edg/") || ua.contains("EdgA/") || ua.contains("EdgiOS/") {
+        "Edge"
+    } else if ua.contains("OPR/") || ua.contains("Opera") {
+        "Opera"
+    } else if ua.contains("SamsungBrowser") {
+        "Samsung Internet"
+    } else if ua.contains("Firefox/") || ua.contains("FxiOS/") {
+        "Firefox"
+    } else if ua.contains("Chrome/") || ua.contains("CriOS/") {
+        "Chrome"
+    } else if ua.contains("Safari/") {
+        "Safari"
+    } else {
+        ""
+    };
+    match (os, browser) {
+        ("", "") => "Browser".to_string(),
+        ("", b) => b.to_string(),
+        (o, "") => o.to_string(),
+        (o, b) => format!("{o} · {b}"),
+    }
 }
 
 fn esc(s: &str) -> String {
@@ -801,7 +877,7 @@ const ICON_FILE: &str = r##"<svg width="20" height="20" viewBox="0 0 16 16" fill
 const ICON_IMAGE: &str = r##"<svg width="20" height="20" viewBox="0 0 16 16" fill="none" stroke="#a084ff" stroke-width="1.2" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1"/><circle cx="6" cy="6.5" r="1"/><path d="M2.5 12l3.5-3.5 2.5 2.5 2-2 3 3"/></svg>"##;
 const ICON_DOWNLOAD: &str = r##"<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5v8M5 7.5l3 3 3-3"/><path d="M2.5 10.5v3h11v-3"/></svg>"##;
 
-const ICON_UPLOAD: &str = r##"<svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="#19e3f0" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 10.5V2.5M5 5.5l3-3 3 3"/><path d="M2.5 10.5v3h11v-3"/></svg>"##;
+const ICON_UPLOAD_BIG: &str = r##"<svg width="34" height="34" viewBox="0 0 16 16" fill="none" stroke="#19e3f0" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 10.5V2.5M5 5.5l3-3 3 3"/><path d="M2.5 10.5v3h11v-3"/></svg>"##;
 const ICON_PLAY: &str = r##"<svg width="28" height="28" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="7.5" fill="rgba(11,14,18,.7)"/><path d="M6.5 5v6l5-3z" fill="#e6ecf2"/></svg>"##;
 const ICON_MEDIA: &str = r##"<svg width="20" height="20" viewBox="0 0 16 16" fill="none" stroke="#f45db8" stroke-width="1.2" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1"/><path d="M6.5 6v4l3.5-2z"/></svg>"##;
 const ICON_LOCK: &str = r##"<svg width="44" height="44" viewBox="0 0 16 16" fill="none" stroke="#19e3f0" stroke-width="1.1" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="10" height="7" rx="1"/><path d="M5 7V5a3 3 0 0 1 6 0v2"/></svg>"##;
@@ -837,12 +913,19 @@ a.row:hover{background:#1a2028}
 footer{text-align:center;color:#55606c;font-size:12px;padding:16px}
 .notice{background:#0c5c64;border:1px solid #19e3f0;border-radius:4px;padding:10px 12px}
 .error{color:#ef4455}
-.upload{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;align-items:end;margin:0 0 16px;padding:14px;border:1px dashed #28303a;border-radius:8px;background:#12161c}
-.up-title{grid-column:1/-1;display:flex;align-items:center;gap:8px;font-weight:600}
-.field{display:flex;flex-direction:column;gap:6px;font-size:13px;color:#95a2b0}
-.field input{height:36px;padding:0 10px;border:1px solid #28303a;border-radius:4px;background:#0b0e12;color:#e6ecf2;font:inherit}
-.field input[type=file]{padding:6px}
-.upload button{grid-column:1/-1;justify-self:start}
+.drop{position:relative;margin:0 0 16px}
+.pick{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+.drop-area{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;min-height:128px;padding:20px;border:1.5px dashed #28303a;border-radius:8px;background:#12161c;cursor:pointer;text-align:center;transition:border-color .12s,background .12s}
+.drop-area:hover,.drop.over .drop-area,.pick:focus-visible+.drop-area{border-color:#19e3f0;background:#0f1d22}
+.drop-main{font-size:16px;font-weight:600;margin-top:6px}
+.drop-sub{font-size:13px;color:#95a2b0}.drop-sub u{color:#19e3f0;text-decoration:none}
+.drop.busy .drop-area{display:none}
+.drop-progress{padding:16px;border:1px solid #28303a;border-radius:8px;background:#12161c}
+.drop-line{display:flex;justify-content:space-between;gap:12px;margin-bottom:10px;font-size:14px}
+.drop-status{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.drop-pct{color:#95a2b0;font-variant-numeric:tabular-nums}
+.track{height:6px;border-radius:3px;background:#1a2028;overflow:hidden}.fill{height:100%;width:0;background:#19e3f0;transition:width .15s}
+.drop.failed .fill{background:#ef4455}
+.drop noscript .btn{margin-top:10px}
 .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;margin:0 0 16px}
 .tile{position:relative;display:block;aspect-ratio:1;border-radius:6px;overflow:hidden;background:#1a2028;border:1px solid #28303a}
 .tile img,.tile video{width:100%;height:100%;object-fit:cover;display:block}
@@ -860,13 +943,24 @@ audio.viewer-media{width:100%;margin:40px 16px}
 .hero-actions{display:flex;flex-direction:column;align-items:center;gap:8px;margin:16px 0}
 .btn.big{height:48px;padding:0 20px;font-size:13px}
 .pw{display:flex;flex-direction:column;gap:12px;width:100%;max-width:320px;text-align:left}
-@media (max-width:560px){.upload{grid-template-columns:1fr}}
 @media (max-width:560px){.row .meta{display:none}h1{font-size:22px}}
 "#;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn devices() {
+        let iphone = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
+        assert_eq!(device_label(iphone), "iPhone · Safari");
+        let win = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36 Edg/140.0";
+        assert_eq!(device_label(win), "Windows-PC · Edge");
+        let android = "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Mobile Safari/537.36";
+        assert_eq!(device_label(android), "Android-Handy · Chrome");
+        assert_eq!(device_label("Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0"), "Linux-PC · Firefox");
+        assert_eq!(device_label("curl/8.0"), "Browser");
+    }
 
     #[test]
     fn escaping() {

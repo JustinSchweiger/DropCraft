@@ -99,6 +99,9 @@ check "Name-Konflikt -> neue Datei" "$(curl -s "${A[@]}" "$B/files/download?path
 check "Original unverändert" "$(curl -s "${A[@]}" "$B/files/download?path=Teilen/Grüße%20%26%20%3CTest%3E.txt")" "Hallo Welt"
 check "Urheber im Feed" "$(curl -s "${A[@]}" "$B/sync/changes?cursor=0" | jq -r '.entries[] | select(.path=="Teilen/Grüße & <Test> (2).txt") | .modified_by')" "Gast: Anna"
 check "Urheber der App" "$(curl -s "${A[@]}" "$B/sync/changes?cursor=0" | jq -r '.entries[] | select(.path=="r.txt") | .modified_by')" "test"
+check "Gerät statt Name" "$(code -A 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Version/18.0 Mobile/15E148 Safari/604.1' -F "files=@/tmp/gast.txt;filename=handy.txt" "$S/upload")" 303
+check "Urheber = Gerät" "$(curl -s "${A[@]}" "$B/sync/changes?cursor=0" | jq -r '.entries[] | select(.path=="Teilen/handy.txt") | .modified_by')" "Gast · iPhone · Safari"
+check "Upload-Skript" "$(curl -s -o /dev/null -w '%{content_type}' "http://127.0.0.1:18080/assets/upload.js")" "text/javascript; charset=utf-8"
 check "Upload in Unterordner" "$(code -F "files=@/tmp/gast.txt;filename=neu.txt" "$S/upload?p=Unter")" 303
 check "landet im Unterordner" "$(curl -s "${A[@]}" "$B/files/download?path=Teilen/Unter/neu.txt")" "vom gast"
 check "Pfad im Dateinamen entschärft" "$(code -F "files=@/tmp/gast.txt;filename=../../Privat/x.txt" "$S/upload")" 303
