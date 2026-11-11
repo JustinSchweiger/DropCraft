@@ -1,1 +1,0 @@
-/home/claude/dropcraft/client/target/debug/libdropcraft_core.rlib: /home/claude/dropcraft/client/core/src/api.rs /home/claude/dropcraft/client/core/src/lib.rs /home/claude/dropcraft/client/core/src/state.rs /home/claude/dropcraft/client/core/src/sync.rs

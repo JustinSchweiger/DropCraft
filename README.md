@@ -1,12 +1,39 @@
 # DropCraft
 
-Eigener Dropbox-Klon: ein Rust-Server mit getrenntem Speicher pro Account, dazu Apps für Windows und Android/iOS (in Arbeit).
+Eigener Dropbox-Klon: ein Rust-Server mit getrenntem Speicher pro Account, dazu Apps für Windows (fertig) und Android/iOS (geplant).
 
 ## Aufbau
 
 ```
-server/   Rust-Backend (axum + SQLite), speichert Dateien als Blobs pro Account
-deploy/   docker-compose + Caddy (automatisches HTTPS) + Setup-Skript für den VPS
+server/          Rust-Backend (axum + SQLite), speichert Dateien als Blobs pro Account
+deploy/          docker-compose + Caddy (automatisches HTTPS) + Setup-Skript für den VPS
+client/core/     Sync-Engine + API-Client (Rust), später auch für die Handy-App
+client/desktop/  Windows-App (egui): Sync-Ordner, Taskleisten-Symbol, Autostart
+```
+
+## Windows-App bauen und starten
+
+Voraussetzung: Rust (https://rustup.rs) mit den Visual-Studio-Buildtools.
+
+```powershell
+cd client
+cargo build --release -p dropcraft-desktop
+.\target\release\DropCraft.exe
+```
+
+Die fertige Datei `client\target\release\DropCraft.exe` kannst du an einen beliebigen Ort kopieren.
+Beim ersten Start fragt sie nach Server, Benutzername, Passwort und Sync-Ordner.
+
+- **Fenster schließen** = in die Taskleiste minimieren. Beenden über das Taskleisten-Symbol (Rechtsklick).
+- Einstellungen und Sync-Stand liegen in `%APPDATA%\DropCraft\`.
+- Ignoriert werden u. a. `~$…`-Sperrdateien von Office, `*.tmp`, `desktop.ini`, `Thumbs.db`.
+- Wird eine Datei auf zwei Geräten gleichzeitig geändert, bleibt die lokale Version als
+  „Name (Konflikt Gerät Datum).ext“ erhalten.
+
+Tests des Sync-Kerns (startet einen echten Server, braucht vorher `cargo build --release` in `server/`):
+
+```bash
+cd client && cargo test -p dropcraft-core
 ```
 
 Jeder Account hat einen eigenen Ordner `data/users/<id>/blobs/` und ein eigenes Speicherlimit.
