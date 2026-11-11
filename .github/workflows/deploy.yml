@@ -10,6 +10,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+  actions: read   # Artefakt aus dem CI-Lauf laden
+
 concurrency:
   group: deploy
   cancel-in-progress: false
@@ -30,6 +34,7 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
       - name: Windows-App aus der CI holen
+        continue-on-error: true
         if: env.DEPLOY_HOST != '' && github.event_name == 'workflow_run'
         uses: actions/download-artifact@v4
         with:
