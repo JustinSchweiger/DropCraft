@@ -8,68 +8,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::icons::{disc, line, logo_rgba};
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
     MouseButton, TrayIconBuilder, TrayIconEvent,
 };
-
-/// Das Würfel-Logo als RGBA-Bild, im Code gezeichnet.
-pub fn logo_rgba(size: u32) -> Vec<u8> {
-    let s = size as f32;
-    let mut px = vec![0u8; (size * size * 4) as usize];
-    let bg = [0x0b, 0x0e, 0x12, 0xff];
-    let cyan = [0x19, 0xe3, 0xf0, 0xff];
-    let r = s * 0.2;
-    // Abgerundetes Quadrat als Hintergrund.
-    for y in 0..size {
-        for x in 0..size {
-            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            let dx = (r - fx).max(fx - (s - r)).max(0.0);
-            let dy = (r - fy).max(fy - (s - r)).max(0.0);
-            if dx * dx + dy * dy <= r * r {
-                let i = ((y * size + x) * 4) as usize;
-                px[i..i + 4].copy_from_slice(&bg);
-            }
-        }
-    }
-    // Isometrischer Würfel.
-    let c = s / 2.0;
-    let h = s * 0.34;
-    let w = h * 0.866;
-    let top = (c, c - h);
-    let ul = (c - w, c - h / 2.0);
-    let ur = (c + w, c - h / 2.0);
-    let mid = (c, c);
-    let ll = (c - w, c + h / 2.0);
-    let lr = (c + w, c + h / 2.0);
-    let bot = (c, c + h);
-    let t = (s / 16.0).max(1.2);
-    for (a, b) in [(top, ul), (top, ur), (ul, ll), (ur, lr), (ll, bot), (lr, bot), (ul, mid), (ur, mid), (mid, bot)] {
-        line(&mut px, size, a, b, t, cyan);
-    }
-    px
-}
-
-pub(crate) fn line(px: &mut [u8], size: u32, a: (f32, f32), b: (f32, f32), thick: f32, col: [u8; 4]) {
-    let (vx, vy) = (b.0 - a.0, b.1 - a.1);
-    let len2 = vx * vx + vy * vy;
-    for y in 0..size {
-        for x in 0..size {
-            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            let tt = (((fx - a.0) * vx + (fy - a.1) * vy) / len2).clamp(0.0, 1.0);
-            let (qx, qy) = (a.0 + tt * vx - fx, a.1 + tt * vy - fy);
-            let d = (qx * qx + qy * qy).sqrt();
-            let cover = (thick / 2.0 + 0.5 - d).clamp(0.0, 1.0);
-            if cover > 0.0 {
-                let i = ((y * size + x) * 4) as usize;
-                for k in 0..3 {
-                    px[i + k] = (px[i + k] as f32 * (1.0 - cover) + col[k] as f32 * cover) as u8;
-                }
-                px[i + 3] = px[i + 3].max((255.0 * cover) as u8);
-            }
-        }
-    }
-}
 
 /// Fenster-Steuerung. Unter Windows direkt über die Win32-API, weil egui
 /// bei verstecktem Fenster nicht zeichnet und Befehle sonst liegen blieben.
@@ -227,23 +170,6 @@ pub struct TrayStatus {
     pub state: TrayState,
     pub tooltip: String,
     pub pause_label: &'static str,
-}
-
-/// Disc mit weicher Kante.
-fn disc(px: &mut [u8], size: u32, c: (f32, f32), r: f32, col: [u8; 4]) {
-    for y in 0..size {
-        for x in 0..size {
-            let (dx, dy) = (x as f32 + 0.5 - c.0, y as f32 + 0.5 - c.1);
-            let cover = (r + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
-            if cover > 0.0 {
-                let i = ((y * size + x) * 4) as usize;
-                for k in 0..3 {
-                    px[i + k] = (px[i + k] as f32 * (1.0 - cover) + col[k] as f32 * cover) as u8;
-                }
-                px[i + 3] = px[i + 3].max((255.0 * cover) as u8);
-            }
-        }
-    }
 }
 
 /// Taskleisten-Symbol: Logo plus Abzeichen unten rechts. Beim Synchronisieren

@@ -188,13 +188,9 @@ pub fn register_context_menu(accounts: &[Account]) {
         let Ok((key, _)) = hkcu.create_subkey(base) else { continue };
         let _ = key.set_value("MUIVerb", &"DropCraft-Link kopieren");
         let _ = key.set_value("Icon", &format!("\"{}\",0", exe.display()));
-        // Nur in den Sync-Ordnern anzeigen.
-        let cond = accounts
-            .iter()
-            .map(|a| format!("System.ItemPathDisplay:~<\"{}\"", a.sync_dir.display()))
-            .collect::<Vec<_>>()
-            .join(" OR ");
-        let _ = key.set_value("AppliesTo", &cond);
+        // Kein „AppliesTo“-Filter: der war unzuverlässig. Liegt die Datei
+        // außerhalb der Sync-Ordner, meldet die App das freundlich.
+        let _ = key.delete_value("AppliesTo");
         if let Ok((cmd, _)) = key.create_subkey("command") {
             let _ = cmd.set_value("", &format!("\"{}\" --share \"%1\"", exe.display()));
         }

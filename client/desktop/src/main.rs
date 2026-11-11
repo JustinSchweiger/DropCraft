@@ -6,6 +6,8 @@ mod app;
 mod cloudfiles;
 mod config;
 mod folder_icon;
+#[allow(dead_code)]
+mod icons;
 mod theme;
 mod tray;
 mod worker;
@@ -36,7 +38,7 @@ fn main() -> eframe::Result {
         }
     };
 
-    let icon = egui::IconData { rgba: tray::logo_rgba(64), width: 64, height: 64 };
+    let icon = egui::IconData { rgba: icons::logo_rgba(64), width: 64, height: 64 };
     let options = eframe::NativeOptions {
         // Unter Windows ein rahmenloses Popup über der Taskleiste, das erst
         // beim Klick aufs Tray-Symbol erscheint.

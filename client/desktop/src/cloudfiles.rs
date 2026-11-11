@@ -4,9 +4,10 @@
 //! Nur aktiv mit `cargo build --features cloud-files` unter Windows.
 
 use std::{
-    os::windows::fs::MetadataExt,
+    collections::HashSet,
+    os::windows::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
-    sync::mpsc::Sender,
+    sync::{mpsc::Sender, Mutex},
 };
 
 use cloud_filter::{
@@ -27,6 +28,19 @@ const ATTR_REPARSE_POINT: u32 = 0x0000_0400;
 const ATTR_PINNED: u32 = 0x0008_0000;
 const ATTR_UNPINNED: u32 = 0x0010_0000;
 const ATTR_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+/// Nötig, um auch Ordner öffnen zu können.
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+/// Normales Win32-Handle ohne Datenzugriff (löst keinen Download aus).
+/// `exclusive`: für das Freigeben des Inhalts (Dehydrieren) nötig.
+fn open_handle(p: &Path, exclusive: bool) -> std::io::Result<Placeholder> {
+    let mut o = std::fs::OpenOptions::new();
+    o.access_mode(0).custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    if exclusive {
+        o.share_mode(0);
+    }
+    Ok(Placeholder::from(o.open(p)?))
+}
 
 fn attrs(p: &Path) -> u32 {
     std::fs::symlink_metadata(p).map(|m| m.file_attributes()).unwrap_or(0)
@@ -56,6 +70,8 @@ fn remote_of(root: &Path, local: &Path) -> Option<String> {
 
 pub struct CloudHooks {
     root: PathBuf,
+    /// In diesem Programmlauf schon als synchron markiert.
+    marked: Mutex<HashSet<PathBuf>>,
 }
 
 impl CloudHooks {
@@ -81,15 +97,12 @@ impl CloudHooks {
         attrs(l) & ATTR_REPARSE_POINT != 0
     }
 
-    fn ensure_placeholder(&self, l: &Path, is_dir: bool) -> std::io::Result<Placeholder> {
-        let mut ph = Placeholder::options().write_access().open(l).map_err(io_err)?;
+    /// Öffnet die Datei/den Ordner und macht sie bei Bedarf zum Platzhalter.
+    fn ensure_placeholder(&self, l: &Path, exclusive: bool) -> std::io::Result<Placeholder> {
+        let mut ph = open_handle(l, exclusive)?;
         if !Self::is_placeholder(l) {
             let blob = remote_of(&self.root, l).unwrap_or_default().into_bytes();
-            let mut opts = ConvertOptions::default().mark_in_sync().blob(blob);
-            if is_dir {
-                opts = opts.has_children();
-            }
-            ph.convert_to_placeholder(opts, None).map_err(io_err)?;
+            ph.convert_to_placeholder(ConvertOptions::default().mark_in_sync().blob(blob), None).map_err(io_err)?;
         }
         Ok(ph)
     }
@@ -121,22 +134,31 @@ impl LocalHooks for CloudHooks {
 
     fn update_placeholder(&self, l: &Path, e: &RemoteEntry) -> std::io::Result<bool> {
         let blob = e.path.clone().into_bytes();
-        let mut ph = self.ensure_placeholder(l, false)?;
+        let mut ph = self.ensure_placeholder(l, true)?;
         ph.update(UpdateOptions::default().metadata(metadata_for(e)).dehydrate().mark_in_sync().blob(&blob), None)
             .map_err(io_err)?;
         Ok(true)
     }
 
     fn free_space(&self, l: &Path) -> std::io::Result<()> {
-        let mut ph = self.ensure_placeholder(l, false)?;
+        let mut ph = self.ensure_placeholder(l, true)?;
         ph.update(UpdateOptions::default().dehydrate().mark_in_sync(), None).map_err(io_err)?;
         Ok(())
     }
 
-    fn mark_synced(&self, l: &Path, is_dir: bool) {
-        let res = self.ensure_placeholder(l, is_dir).and_then(|mut ph| ph.mark_in_sync(true, None).map(|_| ()).map_err(io_err));
-        if let Err(e) = res {
-            log::warn!("In-Sync-Markierung für {} fehlgeschlagen: {e}", l.display());
+    fn mark_synced(&self, l: &Path, _is_dir: bool) {
+        let res = self.ensure_placeholder(l, false).and_then(|mut ph| ph.mark_in_sync(true, None).map(|_| ()).map_err(io_err));
+        match res {
+            Ok(()) => {
+                self.marked.lock().unwrap().insert(l.to_path_buf());
+            }
+            Err(e) => log::warn!("In-Sync-Markierung für {} fehlgeschlagen: {e}", l.display()),
+        }
+    }
+
+    fn check_synced(&self, l: &Path, is_dir: bool) {
+        if !self.marked.lock().unwrap().contains(l) {
+            self.mark_synced(l, is_dir);
         }
     }
 }
@@ -258,7 +280,9 @@ pub fn connect(
         return Err("Windows unterstützt hier keine Cloud-Dateien".into());
     }
     let id = root_id(account_id)?;
-    if !id.is_registered().map_err(|e| e.to_string())? {
+    // Immer neu registrieren: aktualisiert Name und Symbol einer bestehenden
+    // Registrierung, Platzhalter bleiben erhalten.
+    {
         let icon = config::app_dir().join("folder.ico");
         let info = SyncRootInfo::default()
             .with_display_name(format!("DropCraft – {label}"))
@@ -273,7 +297,12 @@ pub fn connect(
     }
     let provider = Provider { root: root.to_path_buf(), api, progress, wake };
     let conn = Session::new().connect(root, provider).map_err(|e| format!("Verbindung fehlgeschlagen: {e}"))?;
-    Ok((CloudHooks { root: root.to_path_buf() }, CloudRoot { _conn: conn }))
+    let hooks = CloudHooks { root: root.to_path_buf(), marked: Mutex::new(HashSet::new()) };
+    // Der Sync-Ordner selbst bekommt ebenfalls den grünen Haken.
+    if let Ok(mut ph) = open_handle(root, false) {
+        let _ = ph.mark_in_sync(true, None);
+    }
+    Ok((hooks, CloudRoot { _conn: conn }))
 }
 
 /// Meldet den Sync-Ordner ab (beim Entfernen eines Kontos). Vorher werden
@@ -281,7 +310,7 @@ pub fn connect(
 pub fn unregister(account_id: &str, root: &Path) {
     for entry in walkdir_files(root) {
         if attrs(&entry) & ATTR_RECALL_ON_DATA_ACCESS != 0 {
-            if let Ok(mut ph) = Placeholder::open(&entry) {
+            if let Ok(mut ph) = open_handle(&entry, false) {
                 let _ = ph.hydrate(..);
             }
         }

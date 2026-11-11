@@ -42,6 +42,10 @@ pub trait LocalHooks: Send {
 
     /// Datei/Ordner ist jetzt mit dem Server abgeglichen (grüner Haken).
     fn mark_synced(&self, _local: &Path, _is_dir: bool) {}
+
+    /// Wird regelmäßig für alle abgeglichenen Einträge aufgerufen, damit auch
+    /// ältere Dateien/Ordner markiert werden. Sollte sich Erledigtes merken.
+    fn check_synced(&self, _local: &Path, _is_dir: bool) {}
 }
 
 /// Ohne Platzhalter: alles wird heruntergeladen.

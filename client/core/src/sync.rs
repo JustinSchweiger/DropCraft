@@ -494,10 +494,13 @@ impl SyncEngine {
     /// Angepinnte Platzhalter herunterladen, freigegebene Dateien leeren.
     fn availability(&mut self) -> Result<(), SyncError> {
         for s in self.state.all()? {
+            let local = self.local_path(&s.path);
             if s.is_dir {
+                if local.is_dir() {
+                    self.hooks.check_synced(&local, true);
+                }
                 continue;
             }
-            let local = self.local_path(&s.path);
             if !local.is_file() {
                 continue;
             }
@@ -521,7 +524,11 @@ impl SyncEngine {
                     Err(SyncError::Api(err @ (ApiError::Network(_) | ApiError::Unauthorized))) => return Err(err.into()),
                     Err(err) => self.event(EventKind::Error, &s.path, err.to_string()),
                 }
-            } else if !online_only && self.hooks.wants_free(&local) {
+            } else if online_only {
+                self.hooks.check_synced(&local, false);
+            } else if fs::metadata(&local).map(|m| local_unchanged(&s, &m)).unwrap_or(false) && !self.hooks.wants_free(&local) {
+                self.hooks.check_synced(&local, false);
+            } else if self.hooks.wants_free(&local) {
                 let unchanged = fs::metadata(&local).map(|m| local_unchanged(&s, &m)).unwrap_or(false);
                 if unchanged {
                     if let Err(err) = self.hooks.free_space(&local) {
