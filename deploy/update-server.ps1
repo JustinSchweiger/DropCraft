@@ -1,4 +1,4 @@
-﻿﻿# DropCraft: Server-Update einspielen
+﻿# DropCraft: Server-Update einspielen
 # Lädt dropcraft.zip und das Update-Skript auf den VPS und führt es dort aus.
 # Aufruf in PowerShell (im Ordner Dokumente\DropCraft):
 #   .\update-server.ps1
