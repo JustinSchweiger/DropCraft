@@ -7,6 +7,9 @@ use dropcraft_core::{Api, Event, EventKind};
 /// Fasst Änderungen anderer (Gäste, andere Geräte) in Freigaben mit
 /// eingeschalteter Benachrichtigung zusammen und zeigt je Freigabe eine Meldung.
 pub fn shared_folder_changes(api: &Api, own_device: &str, events: &[Event]) {
+    if !crate::config::Config::load().notifications {
+        return;
+    }
     let relevant: Vec<&Event> = events
         .iter()
         .filter(|e| matches!(e.kind, EventKind::Downloaded | EventKind::NewOnline | EventKind::DeletedLocal))

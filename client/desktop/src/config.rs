@@ -45,11 +45,14 @@ pub struct Config {
     pub up_limit_mbps: f64,
     #[serde(default)]
     pub down_limit_mbps: f64,
+    /// Windows-Meldungen bei Änderungen in Freigaben.
+    #[serde(default = "yes")]
+    pub notifications: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { accounts: Vec::new(), autostart: true, up_limit_mbps: 0.0, down_limit_mbps: 0.0 }
+        Self { accounts: Vec::new(), autostart: true, up_limit_mbps: 0.0, down_limit_mbps: 0.0, notifications: true }
     }
 }
 

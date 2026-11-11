@@ -234,6 +234,7 @@ struct AdminView {
     users: Vec<UserInfo>,
     loading: bool,
     info: Option<(bool, String)>,
+    adding: bool,
     new_name: String,
     new_pw: String,
     new_gb: String,
@@ -244,7 +245,8 @@ struct AdminView {
 
 enum SharesMsg {
     List(Vec<Share>),
-    Created(String),
+    /// Link und Token der neuen Freigabe
+    Created(String, String),
     Updated(String),
     Deleted,
     Failed(String),
@@ -260,19 +262,25 @@ struct SharesView {
     shares: Vec<Share>,
     loading: bool,
     info: Option<(bool, String)>,
-    last_link: Option<String>,
+    /// Aufgeklappte Freigabe (Token)
+    expanded: Option<String>,
     confirm_delete: Option<String>,
     /// Passwort-Eingabe für die Freigabe mit diesem Token
     pw_edit: Option<(String, String)>,
     inbox: Pending<SharesMsg>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Activity,
+    Shares,
+    Account,
+    Settings,
+}
+
 enum Screen {
     Main,
     Form(AccountForm),
-    Admin(AdminView),
-    Shares(SharesView),
-    Settings(SettingsForm),
 }
 
 // ================================================================ App
@@ -283,6 +291,10 @@ pub struct App {
     rts: Vec<AccountRt>,
     selected: usize,
     screen: Screen,
+    tab: Tab,
+    shares: Option<SharesView>,
+    admin: Option<AdminView>,
+    settings: SettingsForm,
     controls: Controls,
     win: tray::WindowHandle,
     had_focus: bool,
@@ -341,6 +353,10 @@ impl App {
             rts,
             selected: 0,
             screen,
+            tab: Tab::Activity,
+            shares: None,
+            admin: None,
+            settings: SettingsForm { up: String::new(), down: String::new() },
             controls,
             win,
             had_focus: false,
@@ -381,332 +397,6 @@ impl App {
             self.screen = Screen::Form(AccountForm::new(&self.cfg));
         }
     }
-
-    fn open_admin(&mut self, ctx: &egui::Context) {
-        let Some(rt) = self.rts.get(self.selected) else { return };
-        let mut view = AdminView {
-            account_id: rt.acc.id.clone(),
-            users: Vec::new(),
-            loading: false,
-            info: None,
-            new_name: String::new(),
-            new_pw: String::new(),
-            new_gb: "50".into(),
-            edit: None,
-            confirm_delete: None,
-            inbox: Arc::new(Mutex::new(None)),
-        };
-        admin_reload(&mut view, &rt.acc, ctx);
-        self.screen = Screen::Admin(view);
-    }
-
-    fn open_shares(&mut self, idx: usize, ctx: &egui::Context) -> Option<&mut SharesView> {
-        let rt = self.rts.get(idx)?;
-        let mut view = SharesView {
-            account_id: rt.acc.id.clone(),
-            shares: Vec::new(),
-            loading: false,
-            info: None,
-            last_link: None,
-            confirm_delete: None,
-            pw_edit: None,
-            inbox: Arc::new(Mutex::new(None)),
-        };
-        shares_reload(&mut view, &rt.acc, ctx);
-        self.selected = idx;
-        self.screen = Screen::Shares(view);
-        match &mut self.screen {
-            Screen::Shares(v) => Some(v),
-            _ => None,
-        }
-    }
-
-    /// Freigabe-Anfrage aus dem Explorer (Rechtsklick) oder dem Dialog.
-    fn share_path(&mut self, path: PathBuf, ctx: &egui::Context) {
-        let found = self.rts.iter().enumerate().find_map(|(i, r)| remote_path(&r.acc.sync_dir, &path).map(|rp| (i, rp)));
-        match found {
-            Some((i, rp)) => {
-                let acc = self.rts[i].acc.clone();
-                if let Some(view) = self.open_shares(i, ctx) {
-                    shares_create(view, &acc, ctx, rp);
-                }
-            }
-            None => {
-                let i = self.selected;
-                if let Some(view) = self.open_shares(i, ctx) {
-                    view.info = Some((false, format!("„{}“ liegt in keinem DropCraft-Ordner.", path.display())));
-                }
-            }
-        }
-    }
-
-    // ------------------------------------------------------------ Freigaben
-
-    fn shares_ui(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
-        let mut pick: Option<bool> = None; // Some(true)=Ordner, Some(false)=Datei
-        let mut back = false;
-        {
-            let Screen::Shares(view) = &mut self.screen else { return };
-            let Some(rt) = self.rts.iter().find(|r| r.acc.id == view.account_id) else {
-                self.screen = Screen::Main;
-                return;
-            };
-            let acc = rt.acc.clone();
-
-            let msg = view.inbox.lock().unwrap().take();
-            if let Some(msg) = msg {
-                view.loading = false;
-                match msg {
-                    SharesMsg::List(l) => view.shares = l,
-                    SharesMsg::Created(url) => {
-                        let copied = copy_to_clipboard(&url);
-                        view.info = Some((true, if copied { "Link erstellt und kopiert".into() } else { "Link erstellt".into() }));
-                        view.last_link = Some(url);
-                        shares_reload(view, &acc, &ctx);
-                    }
-                    SharesMsg::Updated(m) => {
-                        view.info = Some((true, m));
-                        shares_reload(view, &acc, &ctx);
-                    }
-                    SharesMsg::Deleted => {
-                        view.info = Some((true, "Freigabe beendet – der Link funktioniert nicht mehr".into()));
-                        shares_reload(view, &acc, &ctx);
-                    }
-                    SharesMsg::Failed(m) => view.info = Some((false, m)),
-                }
-            }
-
-            header_band(ui, &format!("FREIGABEN · {}", acc.host().to_uppercase()));
-            let footer_h = 48.0;
-            let body_h = ui.available_height() - footer_h;
-            egui::ScrollArea::vertical().max_height(body_h).auto_shrink([false, false]).show(ui, |ui| {
-                egui::Frame::new().inner_margin(16).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.label(RichText::new("Jeder mit dem Link kann den Inhalt ansehen und herunterladen – ohne DropCraft.").color(TEXT_DIM));
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.add(egui::Button::new(theme::button_text("Ordner freigeben …").color(BG)).fill(ACCENT)).clicked() {
-                            pick = Some(true);
-                        }
-                        if ui.button(theme::button_text("Datei …")).clicked() {
-                            pick = Some(false);
-                        }
-                        if view.loading {
-                            ui.spinner();
-                        }
-                    });
-                    if let Some((ok, m)) = &view.info {
-                        ui.add_space(8.0);
-                        ui.horizontal_wrapped(|ui| {
-                            paint_icon(ui, if *ok { Icon::Check } else { Icon::Warning }, if *ok { OK } else { DANGER });
-                            ui.label(m);
-                        });
-                    }
-                    if let Some(link) = view.last_link.clone() {
-                        ui.add_space(6.0);
-                        egui::Frame::new().fill(BG).stroke(Stroke::new(1.0, ACCENT_DIM)).corner_radius(4).inner_margin(10).show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.add(egui::Label::new(RichText::new(&link).monospace().size(11.0).color(ACCENT)).wrap());
-                            ui.horizontal(|ui| {
-                                if ui.small_button("Kopieren").clicked() {
-                                    copy_to_clipboard(&link);
-                                }
-                                if ui.small_button("Im Browser öffnen").clicked() {
-                                    open_url(&link);
-                                }
-                            });
-                        });
-                    }
-
-                    ui.add_space(14.0);
-                    ui.label(theme::label("Aktive Links"));
-                    ui.add_space(4.0);
-                    if view.shares.is_empty() && !view.loading {
-                        ui.label(RichText::new("Noch nichts freigegeben.").color(TEXT_DIM));
-                    }
-                    let api = Api::new(&acc.server, None).ok();
-                    for sh in view.shares.clone() {
-                        let url = api.as_ref().map(|a| a.share_url(&sh.token)).unwrap_or_default();
-                        egui::Frame::new().fill(RAISED).corner_radius(4).inner_margin(10).show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            let name = sh.path.rsplit('/').next().unwrap_or(&sh.path);
-                            ui.add(egui::Label::new(RichText::new(name).color(TEXT).strong()).truncate()).on_hover_text(&sh.path);
-                            ui.add(egui::Label::new(RichText::new(&sh.path).size(11.0).color(TEXT_DIM)).truncate());
-                            // Einstellungen der Freigabe
-                            ui.add_space(4.0);
-                            ui.horizontal_wrapped(|ui| {
-                                let mut up = sh.allow_upload;
-                                if toggle(ui, &mut up).changed() {
-                                    let t = sh.token.clone();
-                                    shares_update(view, &acc, &ctx, t, ShareSettings { allow_upload: Some(up), ..Default::default() });
-                                }
-                                ui.label("Gäste dürfen hochladen");
-                            });
-                            ui.horizontal_wrapped(|ui| {
-                                let mut n = sh.notify;
-                                if toggle(ui, &mut n).changed() {
-                                    let t = sh.token.clone();
-                                    shares_update(view, &acc, &ctx, t, ShareSettings { notify: Some(n), ..Default::default() });
-                                }
-                                ui.label("Bei Änderungen benachrichtigen");
-                            });
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label(RichText::new("Gültig").color(TEXT_DIM));
-                                let current = match sh.expires_at {
-                                    Some(t) => expiry_text(t),
-                                    None => "unbegrenzt".into(),
-                                };
-                                let mut choice: Option<i64> = None;
-                                egui::ComboBox::from_id_salt(("exp", &sh.token)).selected_text(current).show_ui(ui, |ui| {
-                                    for (label, days) in [("unbegrenzt", 0i64), ("1 Tag", 1), ("7 Tage", 7), ("30 Tage", 30), ("90 Tage", 90)] {
-                                        if ui.selectable_label(false, label).clicked() {
-                                            choice = Some(days);
-                                        }
-                                    }
-                                });
-                                if let Some(days) = choice {
-                                    let at = if days == 0 { 0 } else { chrono::Utc::now().timestamp_millis() + days * 86_400_000 };
-                                    let t = sh.token.clone();
-                                    shares_update(view, &acc, &ctx, t, ShareSettings { expires_at: Some(at), ..Default::default() });
-                                }
-                            });
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label(RichText::new(if sh.has_password { "Passwort: aktiv" } else { "Passwort: keins" }).color(TEXT_DIM));
-                                let editing = view.pw_edit.as_ref().map(|(t, _)| t == &sh.token).unwrap_or(false);
-                                if !editing {
-                                    if ui.small_button(if sh.has_password { "Ändern" } else { "Festlegen" }).clicked() {
-                                        view.pw_edit = Some((sh.token.clone(), String::new()));
-                                    }
-                                    if sh.has_password && ui.small_button("Entfernen").clicked() {
-                                        let t = sh.token.clone();
-                                        shares_update(view, &acc, &ctx, t, ShareSettings { password: Some(String::new()), ..Default::default() });
-                                    }
-                                }
-                            });
-                            let mut save_pw: Option<(String, String)> = None;
-                            if let Some((t, pw)) = view.pw_edit.as_mut() {
-                                if t == &sh.token {
-                                    ui.horizontal(|ui| {
-                                        ui.add(egui::TextEdit::singleline(pw).password(true).hint_text("mind. 4 Zeichen").desired_width(150.0));
-                                        if ui.add_enabled(pw.len() >= 4, egui::Button::new("Speichern")).clicked() {
-                                            save_pw = Some((t.clone(), pw.clone()));
-                                        }
-                                    });
-                                }
-                            }
-                            if let Some((t, pw)) = save_pw {
-                                view.pw_edit = None;
-                                shares_update(view, &acc, &ctx, t, ShareSettings { password: Some(pw), ..Default::default() });
-                            }
-                            ui.add_space(4.0);
-                            ui.horizontal(|ui| {
-                                if ui.small_button("Link kopieren").clicked() {
-                                    if copy_to_clipboard(&url) {
-                                        view.info = Some((true, format!("Link für „{name}“ kopiert")));
-                                    }
-                                }
-                                if ui.small_button("Öffnen").clicked() {
-                                    open_url(&url);
-                                }
-                                if view.confirm_delete.as_deref() == Some(sh.token.as_str()) {
-                                    if ui.small_button(RichText::new("Wirklich beenden").color(DANGER)).clicked() {
-                                        view.confirm_delete = None;
-                                        shares_delete(view, &acc, &ctx, sh.token.clone());
-                                    }
-                                } else if ui.small_button(RichText::new("Beenden").color(DANGER)).clicked() {
-                                    view.confirm_delete = Some(sh.token.clone());
-                                }
-                            });
-                        });
-                        ui.add_space(4.0);
-                    }
-                });
-            });
-            footer_band(ui, footer_h, |ui| {
-                if ui.button(theme::button_text("Zurück")).clicked() {
-                    back = true;
-                }
-            });
-        }
-        if back {
-            self.screen = Screen::Main;
-            return;
-        }
-        if let Some(folder) = pick {
-            let start = self.rts[self.selected].acc.sync_dir.clone();
-            let dlg = rfd::FileDialog::new().set_directory(&start);
-            let chosen = if folder { dlg.pick_folder() } else { dlg.pick_file() };
-            if let Some(p) = chosen {
-                self.share_path(p, &ctx);
-            }
-        }
-    }
-
-    // ------------------------------------------------------------ Einstellungen
-
-    fn settings_ui(&mut self, ui: &mut egui::Ui) {
-        let Screen::Settings(form) = &mut self.screen else { return };
-        header_band(ui, "EINSTELLUNGEN");
-        let mut save = false;
-        let mut back = false;
-        egui::Frame::new().inner_margin(16).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.label(theme::label("Bandbreite"));
-            ui.add_space(4.0);
-            egui::Grid::new("bw").num_columns(3).spacing([10.0, 10.0]).show(ui, |ui| {
-                ui.label(RichText::new("Upload").color(TEXT_DIM));
-                ui.add(egui::TextEdit::singleline(&mut form.up).hint_text("unbegrenzt").desired_width(90.0));
-                ui.label("MB/s");
-                ui.end_row();
-                ui.label(RichText::new("Download").color(TEXT_DIM));
-                ui.add(egui::TextEdit::singleline(&mut form.down).hint_text("unbegrenzt").desired_width(90.0));
-                ui.label("MB/s");
-                ui.end_row();
-            });
-            ui.label(RichText::new("Leer lassen für unbegrenzt. „Pausieren“ hält laufende Übertragungen sofort an.").size(11.0).color(TEXT_DIM));
-            if cfg!(windows) {
-                ui.add_space(14.0);
-                ui.label(theme::label("Start"));
-                ui.horizontal(|ui| {
-                    if toggle(ui, &mut self.cfg.autostart).changed() {
-                        config::set_autostart(self.cfg.autostart);
-                    }
-                    ui.label("Mit Windows starten");
-                });
-            }
-            ui.add_space(14.0);
-            ui.label(theme::label("Benachrichtigungen"));
-            ui.horizontal(|ui| {
-                if ui.button(theme::button_text("Test senden")).clicked() {
-                    std::thread::spawn(|| crate::notify::show("DropCraft", "So sehen Benachrichtigungen aus."));
-                }
-                ui.label(RichText::new("Kommt nichts an? Windows-Einstellungen → System → Benachrichtigungen → DropCraft").size(11.0).color(TEXT_DIM));
-            });
-        });
-        footer_band(ui, 48.0, |ui| {
-            if ui.button(theme::button_text("Zurück")).clicked() {
-                back = true;
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(egui::Button::new(theme::button_text("Speichern").color(BG)).fill(ACCENT)).clicked() {
-                    save = true;
-                }
-            });
-        });
-        if save {
-            let parse = |s: &str| s.trim().replace(',', ".").parse::<f64>().ok().filter(|v| *v > 0.0).unwrap_or(0.0);
-            self.cfg.up_limit_mbps = parse(&form.up);
-            self.cfg.down_limit_mbps = parse(&form.down);
-            self.cfg.apply_bandwidth(&self.bw);
-            self.save();
-            self.screen = Screen::Main;
-        } else if back {
-            self.screen = Screen::Main;
-        }
-    }
-
-    // ------------------------------------------------------------ Konto-Formular
 
     fn form_ui(&mut self, ui: &mut egui::Ui) {
         let Screen::Form(form) = &mut self.screen else { return };
@@ -854,98 +544,78 @@ impl App {
         }
     }
 
-    // ------------------------------------------------------------ Benutzerverwaltung
-
-    fn admin_ui(&mut self, ui: &mut egui::Ui) {
-        let Screen::Admin(view) = &mut self.screen else { return };
-        let Some(rt) = self.rts.iter().find(|r| r.acc.id == view.account_id) else {
-            self.screen = Screen::Main;
-            return;
-        };
-        let acc = rt.acc.clone();
-        let ctx = ui.ctx().clone();
-
-        let msg = view.inbox.lock().unwrap().take();
-        if let Some(msg) = msg {
-            view.loading = false;
-            match msg {
-                AdminMsg::Users(u) => view.users = u,
-                AdminMsg::Done(m) => {
-                    view.info = Some((true, m));
-                    admin_reload(view, &acc, &ctx);
-                }
-                AdminMsg::Failed(m) => view.info = Some((false, m)),
+    fn set_tab(&mut self, tab: Tab) {
+        if tab != self.tab || tab == Tab::Shares {
+            // Beim Öffnen frisch laden.
+            match tab {
+                Tab::Shares => self.shares = None,
+                Tab::Account => self.admin = None,
+                _ => {}
             }
         }
+        if tab == Tab::Settings {
+            let f = |v: f64| if v > 0.0 { fmt_gb(v) } else { String::new() };
+            self.settings = SettingsForm { up: f(self.cfg.up_limit_mbps), down: f(self.cfg.down_limit_mbps) };
+        }
+        self.confirm_remove = false;
+        self.tab = tab;
+    }
 
-        header_band(ui, &format!("BENUTZER · {}", acc.host().to_uppercase()));
-        let mut back = false;
-        let footer_h = 48.0;
-        let body_h = ui.available_height() - footer_h;
-        egui::ScrollArea::vertical().max_height(body_h).auto_shrink([false, false]).show(ui, |ui| {
-            egui::Frame::new().inner_margin(16).show(ui, |ui| {
-                ui.label(theme::label("Neuer Benutzer"));
-                ui.add_space(4.0);
-                egui::Grid::new("new_user").num_columns(2).spacing([12.0, 8.0]).min_col_width(90.0).show(ui, |ui| {
-                    ui.label(RichText::new("Name").color(TEXT_DIM));
-                    ui.add(egui::TextEdit::singleline(&mut view.new_name).desired_width(f32::INFINITY));
-                    ui.end_row();
-                    ui.label(RichText::new("Passwort").color(TEXT_DIM));
-                    ui.add(egui::TextEdit::singleline(&mut view.new_pw).password(true).hint_text("mind. 10 Zeichen").desired_width(f32::INFINITY));
-                    ui.end_row();
-                    ui.label(RichText::new("Speicher").color(TEXT_DIM));
-                    ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut view.new_gb).desired_width(60.0));
-                        ui.label("GB");
-                    });
-                    ui.end_row();
-                });
-                ui.add_space(6.0);
-                let gb = parse_gb(&view.new_gb);
-                let valid = view.new_name.trim().len() >= 3 && view.new_pw.len() >= 10 && gb.is_some() && !view.loading;
-                if ui.add_enabled(valid, egui::Button::new(theme::button_text("Anlegen").color(BG)).fill(ACCENT)).clicked() {
-                    let (name, pw, gb) = (view.new_name.trim().to_string(), view.new_pw.clone(), gb.unwrap_or(0.0));
-                    view.new_name.clear();
-                    view.new_pw.clear();
-                    admin_run(view, &acc, &ctx, move |api| {
-                        api.create_user(&name, &pw, gb, false).map(|_| format!("„{name}“ angelegt ({} GB)", fmt_gb(gb)))
-                    });
-                }
+    /// Lädt Freigaben bzw. Benutzer für das gewählte Konto, wenn nötig.
+    fn ensure_views(&mut self, ctx: &egui::Context) {
+        let Some(rt) = self.rts.get(self.selected) else { return };
+        let id = rt.acc.id.clone();
+        if self.tab == Tab::Shares && self.shares.as_ref().map(|v| v.account_id != id).unwrap_or(true) {
+            let mut v = SharesView {
+                account_id: id.clone(),
+                shares: Vec::new(),
+                loading: false,
+                info: None,
+                expanded: None,
+                confirm_delete: None,
+                pw_edit: None,
+                inbox: Arc::new(Mutex::new(None)),
+            };
+            shares_reload(&mut v, &rt.acc, ctx);
+            self.shares = Some(v);
+        }
+        let is_admin = rt.shared.lock().unwrap().is_admin;
+        if self.tab == Tab::Account && is_admin && self.admin.as_ref().map(|v| v.account_id != id).unwrap_or(true) {
+            let mut v = AdminView {
+                account_id: id,
+                users: Vec::new(),
+                loading: false,
+                info: None,
+                adding: false,
+                new_name: String::new(),
+                new_pw: String::new(),
+                new_gb: "50".into(),
+                edit: None,
+                confirm_delete: None,
+                inbox: Arc::new(Mutex::new(None)),
+            };
+            admin_reload(&mut v, &rt.acc, ctx);
+            self.admin = Some(v);
+        }
+    }
 
-                if let Some((ok, m)) = &view.info {
-                    ui.add_space(8.0);
-                    ui.horizontal_wrapped(|ui| {
-                        if *ok {
-                            paint_icon(ui, Icon::Check, OK);
-                        } else {
-                            paint_icon(ui, Icon::Warning, DANGER);
-                        }
-                        ui.label(m);
-                    });
-                }
-
-                ui.add_space(14.0);
-                ui.horizontal(|ui| {
-                    ui.label(theme::label("Alle Benutzer"));
-                    if view.loading {
-                        ui.spinner();
-                    }
-                });
-                ui.add_space(4.0);
-                let users = view.users.clone();
-                for u in &users {
-                    user_row(ui, u, view, &acc, &ctx);
-                }
-            });
-        });
-
-        footer_band(ui, footer_h, |ui| {
-            if ui.button(theme::button_text("Zurück")).clicked() {
-                back = true;
-            }
-        });
-        if back {
-            self.screen = Screen::Main;
+    /// Freigabe-Anfrage aus dem Explorer (Rechtsklick) oder dem Dialog.
+    fn share_path(&mut self, path: PathBuf, ctx: &egui::Context) {
+        self.screen = Screen::Main;
+        let found = self.rts.iter().enumerate().find_map(|(i, r)| remote_path(&r.acc.sync_dir, &path).map(|rp| (i, rp)));
+        if let Some((i, _)) = &found {
+            self.selected = *i;
+        }
+        self.tab = Tab::Shares;
+        if self.shares.as_ref().map(|v| v.account_id != self.rts[self.selected].acc.id).unwrap_or(true) {
+            self.shares = None;
+        }
+        self.ensure_views(ctx);
+        let acc = self.rts[self.selected].acc.clone();
+        let Some(view) = self.shares.as_mut() else { return };
+        match found {
+            Some((_, rp)) => shares_create(view, &acc, ctx, rp),
+            None => view.info = Some((false, format!("„{}“ liegt in keinem DropCraft-Ordner.", path.display()))),
         }
     }
 
@@ -958,50 +628,151 @@ impl App {
         }
         self.selected = self.selected.min(self.rts.len() - 1);
         let ctx = ui.ctx().clone();
+        self.ensure_views(&ctx);
 
-        // Kopf mit Konto-Reitern
-        let head = egui::Frame::new().fill(BG).inner_margin(egui::Margin { left: 16, right: 16, top: 12, bottom: 10 }).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                let (rect, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
-                paint_cube(ui.painter(), rect, ACCENT);
-                ui.label(RichText::new("DROPCRAFT").size(12.0).strong());
-            });
-            if self.rts.len() > 1 {
-                ui.add_space(6.0);
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    for i in 0..self.rts.len() {
-                        let phase = self.rts[i].shared.lock().unwrap().phase.clone();
-                        let paused = self.rts[i].paused.load(Ordering::SeqCst);
-                        let color = phase_color(&phase, paused);
-                        let sel = i == self.selected;
-                        let resp = account_tab(ui, &self.rts[i].acc.username, color, sel);
-                        if resp.clicked() {
-                            self.selected = i;
-                            self.confirm_remove = false;
-                        }
-                        resp.on_hover_text(self.rts[i].acc.label());
+        let full = ui.max_rect();
+        let head_r = Rect::from_min_size(full.min, Vec2::new(full.width(), 52.0));
+        let tab_r = Rect::from_min_max(Pos2::new(full.left(), full.bottom() - 56.0), full.max);
+        let body_r = Rect::from_min_max(Pos2::new(full.left(), head_r.bottom()), Pos2::new(full.right(), tab_r.top()));
+
+        let mut action: Option<Action> = None;
+        {
+            let mut h = ui.new_child(egui::UiBuilder::new().max_rect(head_r));
+            self.header_ui(&mut h, &mut action);
+        }
+        {
+            let mut b = ui.new_child(egui::UiBuilder::new().max_rect(body_r).layout(egui::Layout::top_down(egui::Align::Min)));
+            b.set_clip_rect(body_r);
+            match self.tab {
+                Tab::Activity => self.activity_tab(&mut b),
+                Tab::Shares => self.shares_tab(&mut b),
+                Tab::Account => self.account_tab(&mut b, &mut action),
+                Tab::Settings => self.settings_tab(&mut b),
+            }
+        }
+        {
+            let mut t = ui.new_child(egui::UiBuilder::new().max_rect(tab_r));
+            if let Some(nt) = tab_bar(&mut t, self.tab) {
+                self.set_tab(nt);
+            }
+        }
+        ui.allocate_rect(full, Sense::hover());
+
+        match action {
+            Some(Action::Select(i)) => {
+                self.selected = i;
+                self.shares = None;
+                self.admin = None;
+                self.confirm_remove = false;
+            }
+            Some(Action::Add) => self.screen = Screen::Form(AccountForm::new(&self.cfg)),
+            Some(Action::Relogin) => self.screen = Screen::Form(AccountForm::relogin(&self.rts[self.selected].acc)),
+            Some(Action::OpenFolder) => open_folder(&self.rts[self.selected].acc.sync_dir),
+            Some(Action::TogglePause) => {
+                let rt = &self.rts[self.selected];
+                let p = !rt.paused.load(Ordering::SeqCst);
+                rt.paused.store(p, Ordering::SeqCst);
+                rt.send(Cmd::SetPaused(p));
+                self.save();
+            }
+            Some(Action::SyncNow) => self.rts[self.selected].send(Cmd::SyncNow),
+            Some(Action::Remove) => {
+                self.confirm_remove = false;
+                self.remove_account(self.selected);
+                self.shares = None;
+                self.admin = None;
+            }
+            Some(Action::Quit) => std::process::exit(0),
+            None => {}
+        }
+    }
+
+    fn header_ui(&mut self, ui: &mut egui::Ui, action: &mut Option<Action>) {
+        let r = ui.max_rect();
+        ui.painter().rect_filled(r, 0.0, BG);
+        ui.painter().hline(r.x_range(), r.bottom() - 0.5, Stroke::new(1.0, BORDER));
+        let inner = r.shrink2(Vec2::new(12.0, 9.0));
+        let pause_r = Rect::from_center_size(Pos2::new(inner.right() - 16.0, inner.center().y), Vec2::splat(32.0));
+        let folder_r = pause_r.translate(Vec2::new(-40.0, 0.0));
+        let acc_r = Rect::from_min_max(inner.min, Pos2::new(folder_r.left() - 8.0, inner.max.y));
+
+        let rt = &self.rts[self.selected];
+        let phase = rt.shared.lock().unwrap().phase.clone();
+        let paused = rt.paused.load(Ordering::SeqCst);
+        let resp = ui.interact(acc_r, ui.scope_id().with("account_switch"), Sense::click());
+        let p = ui.painter();
+        p.rect(acc_r, 4.0, if resp.hovered() { RAISED } else { SURFACE }, Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
+        let av = Rect::from_min_size(Pos2::new(acc_r.left() + 4.0, acc_r.center().y - 13.0), Vec2::splat(26.0));
+        p.rect_filled(av, 4.0, ACCENT_DIM);
+        let initial = rt.acc.username.chars().next().unwrap_or('?').to_uppercase().to_string();
+        p.text(av.center(), egui::Align2::CENTER_CENTER, initial, egui::FontId::proportional(13.0), ACCENT);
+        let tx = av.right() + 8.0;
+        let max_w = acc_r.right() - 40.0 - tx;
+        let name = p.layout_no_wrap(rt.acc.username.clone(), egui::FontId::proportional(13.0), TEXT);
+        let host = p.layout_no_wrap(rt.acc.host().to_string(), egui::FontId::proportional(10.5), TEXT_DIM);
+        let clip = p.with_clip_rect(Rect::from_min_max(Pos2::new(tx, acc_r.top()), Pos2::new(tx + max_w, acc_r.bottom())));
+        clip.galley(Pos2::new(tx, acc_r.center().y - 15.0), name, TEXT);
+        clip.galley(Pos2::new(tx, acc_r.center().y + 1.0), host, TEXT_DIM);
+        p.circle_filled(Pos2::new(acc_r.right() - 30.0, acc_r.center().y), 4.0, phase_color(&phase, paused));
+        paint_icon_at(p, Rect::from_center_size(Pos2::new(acc_r.right() - 14.0, acc_r.center().y), Vec2::splat(12.0)), Icon::Chevron, TEXT_DIM);
+        let (status_icon, _, status_text) = phase_text(&phase, None);
+        let _ = status_icon;
+        let resp = resp.on_hover_text(format!("{} · {}", rt.acc.label(), if paused { "Pausiert".to_string() } else { status_text }));
+
+        egui::Popup::menu(&resp).width(acc_r.width()).show(|ui| {
+            for i in 0..self.rts.len() {
+                let rt = &self.rts[i];
+                let ph = rt.shared.lock().unwrap().phase.clone();
+                let col = phase_color(&ph, rt.paused.load(Ordering::SeqCst));
+                ui.horizontal(|ui| {
+                    let (d, _) = ui.allocate_exact_size(Vec2::new(10.0, 20.0), Sense::hover());
+                    ui.painter().circle_filled(d.center(), 4.0, col);
+                    if ui.selectable_label(i == self.selected, rt.acc.label()).clicked() {
+                        *action = Some(Action::Select(i));
+                        ui.close();
                     }
                 });
             }
+            ui.separator();
+            if ui.button("Jetzt synchronisieren").clicked() {
+                *action = Some(Action::SyncNow);
+                ui.close();
+            }
+            if ui.button("Konto hinzufügen …").clicked() {
+                *action = Some(Action::Add);
+                ui.close();
+            }
+            ui.separator();
+            if ui.button("DropCraft beenden").clicked() {
+                *action = Some(Action::Quit);
+            }
         });
-        ui.painter().hline(ui.max_rect().x_range(), head.response.rect.bottom(), Stroke::new(1.0, BORDER));
 
+        if icon_button(ui, folder_r, Icon::Folder, "Ordner öffnen", false, 0).clicked() {
+            *action = Some(Action::OpenFolder);
+        }
+        let (pi, tip) = if paused { (Icon::Play, "Fortsetzen") } else { (Icon::Pause, "Pausieren") };
+        if icon_button(ui, pause_r, pi, tip, paused, 0).clicked() {
+            *action = Some(Action::TogglePause);
+        }
+    }
+
+    // ------------------------------------------------------------ Aktivität
+
+    fn activity_tab(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         let rt = &mut self.rts[self.selected];
-        let (phase, used, quota, last_sync, is_admin, activity, progress) = {
+        let (phase, used, quota, last_sync, activity, progress) = {
             let sh = rt.shared.lock().unwrap();
             (
                 sh.phase.clone(),
                 sh.used,
                 sh.quota,
                 sh.last_sync,
-                sh.is_admin,
                 sh.activity.iter().take(50).cloned().collect::<Vec<_>>(),
                 sh.progress.as_ref().map(|p| p.lock().unwrap().clone()),
             )
         };
-        // Ereignisse des laufenden Durchgangs oben anzeigen.
         let activity: Vec<_> = progress
             .as_ref()
             .map(|p| p.events.iter().rev().cloned().collect::<Vec<_>>())
@@ -1013,174 +784,285 @@ impl App {
         let paused = rt.paused.load(Ordering::SeqCst);
         let speed = progress.as_ref().map(|p| rt.speed.update(p.bytes_total())).unwrap_or(0.0);
 
-        // Status + Speicher
-        egui::Frame::new().inner_margin(egui::Margin { left: 16, right: 16, top: 12, bottom: 4 }).show(ui, |ui| {
+        let full = ui.max_rect();
+        let quota_h = if quota > 0 { 46.0 } else { 0.0 };
+
+        // Status
+        egui::Frame::new().inner_margin(12).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                let (icon, color, text) = phase_text(&phase, last_sync);
-                if matches!(phase, Phase::Syncing | Phase::Starting) {
-                    ui.add(egui::Spinner::new().size(16.0).color(ACCENT));
-                } else {
+            let active = progress.as_ref().map(|p| p.is_active()).unwrap_or(false);
+            if phase == Phase::NeedsLogin {
+                ui.horizontal(|ui| {
+                    paint_icon(ui, Icon::Warning, WARN);
+                    ui.label(RichText::new("Bitte neu anmelden").size(15.0).color(WARN));
+                });
+                ui.label(RichText::new("Die Anmeldung ist abgelaufen oder wurde auf einem anderen Gerät beendet.").color(TEXT_DIM));
+                if ui.add(egui::Button::new(theme::button_text("Neu anmelden").color(BG)).fill(ACCENT)).clicked() {
+                    self.screen = Screen::Form(AccountForm::relogin(&rt.acc));
+                }
+            } else if let (true, Some(p)) = (active && !paused, &progress) {
+                ctx.request_repaint_after(Duration::from_millis(250));
+                transfer_panel(ui, p, speed);
+            } else {
+                let (icon, color, text) = if paused { (Icon::Pause, TEXT_DIM, "Pausiert".to_string()) } else { phase_text(&phase, last_sync) };
+                ui.horizontal(|ui| {
                     paint_icon(ui, icon, color);
-                }
-                let r = ui.add(egui::Label::new(RichText::new(text).color(TEXT)).truncate());
-                if let Phase::Offline(m) | Phase::Error(m) = &phase {
-                    r.on_hover_text(m);
-                }
-            });
-            if quota > 0 {
-                ui.add_space(6.0);
-                let frac = (used as f32 / quota as f32).clamp(0.0, 1.0);
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 4.0), Sense::hover());
-                ui.painter().rect_filled(rect, 2.0, RAISED);
-                let mut fill = rect;
-                fill.set_width(rect.width() * frac);
-                ui.painter().rect_filled(fill, 2.0, if frac > 0.95 { DANGER } else { ACCENT });
-                ui.label(RichText::new(format!("{} von {} belegt", human_size(used), human_size(quota))).size(11.0).color(TEXT_DIM));
+                    let r = ui.add(egui::Label::new(RichText::new(text).size(15.0).color(if color == OK { TEXT } else { color })).truncate());
+                    if let Phase::Offline(m) | Phase::Error(m) = &phase {
+                        r.on_hover_text(m);
+                    }
+                });
             }
         });
+        let y = ui.cursor().top();
+        ui.painter().hline(full.x_range(), y, Stroke::new(1.0, BORDER));
 
-        if phase == Phase::NeedsLogin {
-            let acc = rt.acc.clone();
-            egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 6)).show(ui, |ui| {
-                ui.label("Die Anmeldung ist abgelaufen oder wurde auf einem anderen Gerät beendet.");
-                if ui.button(theme::button_text("Neu anmelden")).clicked() {
-                    self.screen = Screen::Form(AccountForm::relogin(&acc));
-                }
-            });
-            if !matches!(self.screen, Screen::Main) {
-                return;
-            }
-        }
-
-        // Live-Statistik
-        if let Some(p) = &progress {
-            if p.is_active() {
-                ctx.request_repaint_after(Duration::from_millis(250));
-                stats_panel(ui, p, speed);
-            }
-        }
-
-        let footer_h = 52.0;
-        let list_h = (ui.available_height() - footer_h).max(60.0);
-        egui::Frame::new().inner_margin(egui::Margin { left: 16, right: 16, top: 10, bottom: 4 }).show(ui, |ui| {
+        egui::Frame::new().inner_margin(egui::Margin { left: 12, right: 12, top: 10, bottom: 4 }).show(ui, |ui| {
+            ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.label(theme::label("Zuletzt"));
                 if let Some(p) = &progress {
                     if p.bytes_up + p.bytes_down > 0 {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(
-                                RichText::new(format!("Seit Start: {} hoch · {} runter", human_size(p.bytes_up as i64), human_size(p.bytes_down as i64)))
-                                    .size(11.0)
-                                    .color(TEXT_DIM),
-                            );
+                            ui.label(RichText::new(format!("{} hoch · {} runter", human_size(p.bytes_up as i64), human_size(p.bytes_down as i64))).size(10.5).color(TEXT_DIM));
                         });
                     }
                 }
             });
         });
-        egui::ScrollArea::vertical().max_height(list_h - 30.0).auto_shrink([false, false]).show(ui, |ui| {
-            egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 0)).show(ui, |ui| {
-                for ev in &activity {
-                    activity_row(ui, ev);
-                }
-            });
+        let list_h = (full.bottom() - quota_h - ui.cursor().top()).max(40.0);
+        egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
+            for ev in &activity {
+                activity_row(ui, ev);
+            }
         });
 
-        // Footer
-        let mut action: Option<&str> = None;
-        footer_band(ui, footer_h, |ui| {
-            if ui.add(egui::Button::new(theme::button_text("Ordner öffnen")).min_size(Vec2::new(0.0, 36.0))).clicked() {
-                action = Some("open");
+        if quota > 0 {
+            let r = Rect::from_min_max(Pos2::new(full.left(), full.bottom() - quota_h), full.max);
+            let p = ui.painter();
+            p.rect_filled(r, 0.0, BG);
+            p.hline(r.x_range(), r.top(), Stroke::new(1.0, BORDER));
+            let inner = r.shrink2(Vec2::new(12.0, 10.0));
+            p.text(inner.left_top(), egui::Align2::LEFT_TOP, "Speicher", egui::FontId::proportional(10.5), TEXT_DIM);
+            p.text(inner.right_top(), egui::Align2::RIGHT_TOP, format!("{} von {}", human_size(used), human_size(quota)), egui::FontId::proportional(10.5), TEXT_DIM);
+            let bar = Rect::from_min_size(Pos2::new(inner.left(), inner.bottom() - 4.0), Vec2::new(inner.width(), 4.0));
+            quota_bar(p, bar, used, quota, RAISED);
+        }
+    }
+
+    // ------------------------------------------------------------ Freigaben
+
+    fn shares_tab(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let acc = self.rts[self.selected].acc.clone();
+        let mut pick: Option<bool> = None; // Some(true)=Ordner, Some(false)=Datei
+        {
+            let Some(view) = self.shares.as_mut() else { return };
+            let msg = view.inbox.lock().unwrap().take();
+            if let Some(msg) = msg {
+                view.loading = false;
+                match msg {
+                    SharesMsg::List(l) => view.shares = l,
+                    SharesMsg::Created(url, token) => {
+                        let copied = copy_to_clipboard(&url);
+                        view.info = Some((true, if copied { "Link erstellt und kopiert".into() } else { "Link erstellt".into() }));
+                        view.expanded = Some(token);
+                        shares_reload(view, &acc, &ctx);
+                    }
+                    SharesMsg::Updated(m) => {
+                        view.info = Some((true, m));
+                        shares_reload(view, &acc, &ctx);
+                    }
+                    SharesMsg::Deleted => {
+                        view.info = Some((true, "Freigabe beendet – der Link funktioniert nicht mehr".into()));
+                        shares_reload(view, &acc, &ctx);
+                    }
+                    SharesMsg::Failed(m) => view.info = Some((false, m)),
+                }
             }
-            let pause_text = if paused { "Fortsetzen" } else { "Pausieren" };
-            if ui.add(egui::Button::new(theme::button_text(pause_text)).min_size(Vec2::new(0.0, 36.0))).clicked() {
-                action = Some("pause");
+
+            let full = ui.max_rect();
+            egui::Frame::new().inner_margin(12).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    let n = view.shares.len();
+                    ui.label(theme::label(&format!("{n} {}", if n == 1 { "aktiver Link" } else { "aktive Links" })));
+                    if view.loading {
+                        ui.add(egui::Spinner::new().size(12.0).color(TEXT_DIM));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let file_r = ui.allocate_exact_size(Vec2::splat(30.0), Sense::hover()).0;
+                        if icon_button(ui, file_r, Icon::File, "Datei freigeben …", false, 0).clicked() {
+                            pick = Some(false);
+                        }
+                        if ui.add(egui::Button::new(theme::button_text("Ordner freigeben").color(BG)).fill(ACCENT).min_size(Vec2::new(0.0, 30.0))).clicked() {
+                            pick = Some(true);
+                        }
+                    });
+                });
+                if let Some((ok, m)) = &view.info {
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        paint_icon(ui, if *ok { Icon::Check } else { Icon::Warning }, if *ok { OK } else { DANGER });
+                        ui.label(RichText::new(m).color(TEXT_DIM));
+                    });
+                }
+            });
+            ui.painter().hline(full.x_range(), ui.cursor().top(), Stroke::new(1.0, BORDER));
+
+            let api = Api::new(&acc.server, None).ok();
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                if view.shares.is_empty() && !view.loading {
+                    egui::Frame::new().inner_margin(12).show(ui, |ui| {
+                        ui.label(RichText::new("Noch nichts freigegeben. Ordner auswählen oder im Explorer per Rechtsklick „DropCraft-Link kopieren“.").color(TEXT_DIM));
+                    });
+                }
+                for sh in view.shares.clone() {
+                    let url = api.as_ref().map(|a| a.share_url(&sh.token)).unwrap_or_default();
+                    share_row(ui, view, &sh, &url, &acc, &ctx);
+                }
+            });
+        }
+        if let Some(folder) = pick {
+            let start = acc.sync_dir.clone();
+            let dlg = rfd::FileDialog::new().set_directory(&start);
+            let chosen = if folder { dlg.pick_folder() } else { dlg.pick_file() };
+            self.had_focus = false;
+            if let Some(p) = chosen {
+                self.share_path(p, &ctx);
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.menu_button(theme::button_text("Konto"), |ui| {
-                    let acc = &self.rts[self.selected].acc;
-                    ui.label(RichText::new(acc.label()).color(TEXT));
-                    ui.label(RichText::new(acc.sync_dir.display().to_string()).color(TEXT_DIM).size(11.0));
-                    ui.separator();
-                    if ui.button("Jetzt synchronisieren").clicked() {
-                        action = Some("sync");
-                        ui.close();
-                    }
-                    if ui.button("Freigaben …").clicked() {
-                        action = Some("shares");
-                        ui.close();
-                    }
-                    if is_admin && ui.button("Benutzer verwalten …").clicked() {
-                        action = Some("admin");
-                        ui.close();
-                    }
-                    if ui.button("Einstellungen …").clicked() {
-                        action = Some("settings");
-                        ui.close();
-                    }
-                    if ui.button("Konto hinzufügen …").clicked() {
-                        action = Some("add");
-                        ui.close();
-                    }
-                    if cfg!(windows) {
-                        ui.horizontal(|ui| {
-                            if toggle(ui, &mut self.cfg.autostart).changed() {
-                                action = Some("autostart");
-                            }
-                            ui.label("Mit Windows starten");
+        }
+    }
+
+    // ------------------------------------------------------------ Konto
+
+    fn account_tab(&mut self, ui: &mut egui::Ui, action: &mut Option<Action>) {
+        let ctx = ui.ctx().clone();
+        let rt = &self.rts[self.selected];
+        let acc = rt.acc.clone();
+        let (used, quota, is_admin) = {
+            let sh = rt.shared.lock().unwrap();
+            (sh.used, sh.quota, sh.is_admin)
+        };
+        let full = ui.max_rect();
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            egui::Frame::new().inner_margin(egui::Margin { left: 12, right: 12, top: 14, bottom: 12 }).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("{} belegt", human_size(used))).size(15.0));
+                    if quota > 0 {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(format!("von {}", human_size(quota))).size(10.5).color(TEXT_DIM));
                         });
-                    }
-                    ui.separator();
-                    if !self.confirm_remove {
-                        if ui.button(RichText::new("Konto entfernen …").color(DANGER)).clicked() {
-                            self.confirm_remove = true;
-                        }
-                    } else {
-                        ui.label(RichText::new("Die Dateien im Ordner bleiben erhalten.").size(11.0).color(TEXT_DIM));
-                        if ui.button(RichText::new("Wirklich entfernen").color(DANGER)).clicked() {
-                            action = Some("remove");
-                            ui.close();
-                        }
-                    }
-                    if ui.button("Beenden").clicked() {
-                        std::process::exit(0);
                     }
                 });
+                if quota > 0 {
+                    let (bar, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 6.0), Sense::hover());
+                    quota_bar(ui.painter(), bar, used, quota, BG);
+                }
+                ui.add(egui::Label::new(RichText::new(format!("Ordner: {} · Gerät: {}", acc.sync_dir.display(), acc.device_name)).size(10.5).color(TEXT_DIM)).wrap());
             });
+            ui.painter().hline(full.x_range(), ui.cursor().top(), Stroke::new(1.0, BORDER));
+            if list_row(ui, Icon::Sync, "Jetzt synchronisieren", TEXT, TEXT_DIM).clicked() {
+                *action = Some(Action::SyncNow);
+            }
+
+            if is_admin {
+                if let Some(view) = self.admin.as_mut() {
+                    admin_section(ui, view, &acc, &ctx);
+                }
+            }
+
+            section_label(ui, "Konten in der App", None);
+            if list_row(ui, Icon::Plus, "Weiteres Konto hinzufügen", ACCENT, ACCENT).clicked() {
+                *action = Some(Action::Add);
+            }
+            if !self.confirm_remove {
+                if list_row(ui, Icon::Logout, "Abmelden und Konto entfernen", DANGER, DANGER).clicked() {
+                    self.confirm_remove = true;
+                }
+            } else {
+                egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+                    ui.label(RichText::new(format!("„{}“ wirklich entfernen? Die Dateien im Ordner bleiben erhalten.", acc.label())).color(TEXT));
+                    ui.horizontal(|ui| {
+                        if ui.add(egui::Button::new(theme::button_text("Entfernen").color(TEXT)).fill(DANGER)).clicked() {
+                            *action = Some(Action::Remove);
+                        }
+                        if ui.button(theme::button_text("Abbrechen")).clicked() {
+                            self.confirm_remove = false;
+                        }
+                    });
+                });
+            }
+            if list_row(ui, Icon::Power, "DropCraft beenden", TEXT, TEXT_DIM).clicked() {
+                *action = Some(Action::Quit);
+            }
+            if phase_needs_login(&self.rts[self.selected]) && list_row(ui, Icon::Warning, "Neu anmelden", WARN, WARN).clicked() {
+                *action = Some(Action::Relogin);
+            }
         });
+    }
 
-        match action {
-            Some("open") => open_folder(&self.rts[self.selected].acc.sync_dir),
-            Some("pause") => {
-                let rt = &self.rts[self.selected];
-                let p = !rt.paused.load(Ordering::SeqCst);
-                rt.paused.store(p, Ordering::SeqCst);
-                rt.send(Cmd::SetPaused(p));
-                self.save();
-            }
-            Some("sync") => self.rts[self.selected].send(Cmd::SyncNow),
-            Some("admin") => self.open_admin(&ctx),
-            Some("shares") => {
-                let i = self.selected;
-                self.open_shares(i, &ctx);
-            }
-            Some("add") => self.screen = Screen::Form(AccountForm::new(&self.cfg)),
-            Some("settings") => {
-                let f = |v: f64| if v > 0.0 { fmt_gb(v) } else { String::new() };
-                self.screen = Screen::Settings(SettingsForm { up: f(self.cfg.up_limit_mbps), down: f(self.cfg.down_limit_mbps) });
-            }
-            Some("autostart") => {
-                config::set_autostart(self.cfg.autostart);
-                self.save();
-            }
-            Some("remove") => {
-                self.confirm_remove = false;
-                self.remove_account(self.selected);
-            }
-            _ => {}
+    // ------------------------------------------------------------ Einstellungen
+
+    fn settings_tab(&mut self, ui: &mut egui::Ui) {
+        let full = ui.max_rect();
+        let mut changed_bw = false;
+        let mut changed = false;
+        section_label(ui, "Bandbreite", None);
+        for (label, val) in [("Upload", &mut self.settings.up), ("Download", &mut self.settings.down)] {
+            setting_row(ui, label, None, |ui| {
+                ui.label(RichText::new("MB/s").size(10.5).color(TEXT_DIM));
+                if ui.add(egui::TextEdit::singleline(val).hint_text("unbegrenzt").desired_width(96.0)).changed() {
+                    changed_bw = true;
+                }
+            });
         }
-
+        section_label(ui, "Allgemein", None);
+        if cfg!(windows) {
+            let mut v = self.cfg.autostart;
+            setting_row(ui, "Mit Windows starten", None, |ui| {
+                if toggle(ui, &mut v).changed() {
+                    changed = true;
+                }
+            });
+            if v != self.cfg.autostart {
+                self.cfg.autostart = v;
+                config::set_autostart(v);
+            }
+        }
+        let mut n = self.cfg.notifications;
+        setting_row(ui, "Benachrichtigungen", Some("bei Änderungen in Freigaben"), |ui| {
+            if toggle(ui, &mut n).changed() {
+                changed = true;
+            }
+        });
+        self.cfg.notifications = n;
+        setting_row(ui, "Test-Benachrichtigung", None, |ui| {
+            if ui.link(RichText::new("Senden").color(ACCENT)).clicked() {
+                std::thread::spawn(|| crate::notify::show("DropCraft", "So sehen Benachrichtigungen aus."));
+            }
+        });
+        if changed_bw {
+            let parse = |s: &str| s.trim().replace(',', ".").parse::<f64>().ok().filter(|v| *v > 0.0).unwrap_or(0.0);
+            self.cfg.up_limit_mbps = parse(&self.settings.up);
+            self.cfg.down_limit_mbps = parse(&self.settings.down);
+            self.cfg.apply_bandwidth(&self.bw);
+            changed = true;
+        }
+        if changed {
+            self.save();
+        }
+        let r = Rect::from_min_max(Pos2::new(full.left(), full.bottom() - 34.0), full.max);
+        ui.painter().rect_filled(r, 0.0, BG);
+        ui.painter().hline(r.x_range(), r.top(), Stroke::new(1.0, BORDER));
+        ui.painter().text(
+            Pos2::new(r.left() + 12.0, r.center().y),
+            egui::Align2::LEFT_CENTER,
+            format!("Änderungen gelten sofort · DropCraft {}", env!("CARGO_PKG_VERSION")),
+            egui::FontId::proportional(10.5),
+            TEXT_DIM,
+        );
     }
 }
 
@@ -1199,7 +1081,7 @@ impl eframe::App for App {
 
         // Popup: beim Wegklicken oder mit Esc verschwinden (nicht während
         // des Kontoformulars, dort öffnen sich Ordner-Dialoge).
-        if popup_mode && !matches!(self.screen, Screen::Form(_) | Screen::Shares(_) | Screen::Settings(_)) {
+        if popup_mode && !matches!(self.screen, Screen::Form(_)) {
             let focused = ctx.input(|i| i.viewport().focused);
             match focused {
                 Some(true) => self.had_focus = true,
@@ -1221,9 +1103,6 @@ impl eframe::App for App {
 
         egui::CentralPanel::default().frame(egui::Frame::new().fill(SURFACE)).show(ui, |ui| match self.screen {
             Screen::Form(_) => self.form_ui(ui),
-            Screen::Admin(_) => self.admin_ui(ui),
-            Screen::Shares(_) => self.shares_ui(ui),
-            Screen::Settings(_) => self.settings_ui(ui),
             Screen::Main => self.main_ui(ui),
         });
 
@@ -1238,125 +1117,514 @@ impl eframe::App for App {
 
 // ================================================================ Bausteine
 
-fn stats_panel(ui: &mut egui::Ui, p: &Progress, speed: f64) {
-    egui::Frame::new().inner_margin(egui::Margin { left: 16, right: 16, top: 10, bottom: 6 }).show(ui, |ui| {
+enum Action {
+    Select(usize),
+    Add,
+    Relogin,
+    OpenFolder,
+    TogglePause,
+    SyncNow,
+    Remove,
+    Quit,
+}
+
+fn phase_needs_login(rt: &AccountRt) -> bool {
+    rt.shared.lock().unwrap().phase == Phase::NeedsLogin
+}
+
+fn tab_bar(ui: &mut egui::Ui, current: Tab) -> Option<Tab> {
+    let r = ui.max_rect();
+    ui.painter().rect_filled(r, 0.0, BG);
+    ui.painter().hline(r.x_range(), r.top() + 0.5, Stroke::new(1.0, BORDER));
+    let tabs = [(Tab::Activity, Icon::Pulse, "Aktivität"), (Tab::Shares, Icon::Link, "Freigaben"), (Tab::Account, Icon::User, "Konto"), (Tab::Settings, Icon::Gear, "Einstellungen")];
+    let w = r.width() / tabs.len() as f32;
+    let mut out = None;
+    for (i, (tab, icon, label)) in tabs.into_iter().enumerate() {
+        let cell = Rect::from_min_size(Pos2::new(r.left() + i as f32 * w, r.top()), Vec2::new(w, r.height()));
+        let resp = ui.interact(cell, ui.scope_id().with(("tab", i)), Sense::click());
+        let on = tab == current;
+        let c = if on {
+            ACCENT
+        } else if resp.hovered() {
+            TEXT
+        } else {
+            TEXT_DIM
+        };
+        let p = ui.painter();
+        if on {
+            p.rect_filled(Rect::from_min_size(Pos2::new(cell.left() + w * 0.22, cell.top()), Vec2::new(w * 0.56, 2.0)), 0.0, ACCENT);
+        }
+        paint_icon_at(p, Rect::from_center_size(Pos2::new(cell.center().x, cell.top() + 20.0), Vec2::splat(18.0)), icon, c);
+        p.text(Pos2::new(cell.center().x, cell.top() + 40.0), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(10.5), c);
+        if resp.clicked() {
+            out = Some(tab);
+        }
+    }
+    out
+}
+
+fn icon_button(ui: &mut egui::Ui, rect: Rect, icon: Icon, tip: &str, active: bool, salt: impl std::hash::Hash + std::fmt::Debug) -> egui::Response {
+    let resp = ui.interact(rect, ui.scope_id().with(("ib", tip, salt)), Sense::click());
+    let fill = if active {
+        ACCENT_DIM
+    } else if resp.hovered() {
+        RAISED_HOVER
+    } else {
+        RAISED
+    };
+    ui.painter().rect(rect, 4.0, fill, Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
+    paint_icon_at(ui.painter(), Rect::from_center_size(rect.center(), Vec2::splat(16.0)), icon, if active { ACCENT } else { TEXT });
+    resp.on_hover_text(tip)
+}
+
+fn quota_bar(p: &egui::Painter, bar: Rect, used: i64, quota: i64, track: Color32) {
+    let frac = if quota > 0 { (used as f32 / quota as f32).clamp(0.0, 1.0) } else { 0.0 };
+    p.rect_filled(bar, bar.height() / 2.0, track);
+    let mut fill = bar;
+    fill.set_width(bar.width() * frac);
+    p.rect_filled(fill, bar.height() / 2.0, if frac > 0.95 { DANGER } else { ACCENT });
+}
+
+fn section_label(ui: &mut egui::Ui, text: &str, right: Option<&mut dyn FnMut(&mut egui::Ui)>) {
+    let full = ui.max_rect();
+    egui::Frame::new().inner_margin(egui::Margin { left: 12, right: 12, top: 14, bottom: 6 }).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
-            ui.label(theme::label("Wird synchronisiert"));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if speed > 0.0 {
-                    ui.label(RichText::new(format!("{}/s", human_size(speed as i64))).color(ACCENT).strong());
-                }
-            });
-        });
-        ui.add_space(4.0);
-        egui::Frame::new().fill(RAISED).corner_radius(4).inner_margin(10).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            if let Some(c) = &p.current {
-                ui.horizontal(|ui| {
-                    paint_icon(ui, if c.upload { Icon::Up } else { Icon::Down }, if c.upload { ACCENT } else { OK });
-                    let name = c.path.rsplit('/').next().unwrap_or(&c.path);
-                    ui.add(egui::Label::new(RichText::new(name).color(TEXT)).truncate()).on_hover_text(&c.path);
-                });
-                let frac = if c.total > 0 { (c.done as f32 / c.total as f32).clamp(0.0, 1.0) } else { 1.0 };
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 4.0), Sense::hover());
-                ui.painter().rect_filled(rect, 2.0, SURFACE);
-                let mut fill = rect;
-                fill.set_width(rect.width() * frac);
-                ui.painter().rect_filled(fill, 2.0, if c.upload { ACCENT } else { OK });
-                let status = if c.done == 0 && c.upload {
-                    "Wird geprüft …".to_string()
-                } else {
-                    format!("{} von {} · {} %", human_size(c.done as i64), human_size(c.total as i64), (frac * 100.0) as u32)
-                };
-                ui.label(RichText::new(status).size(11.0).color(TEXT_DIM));
-            }
-            let files = p.remaining_files();
-            let bytes = p.remaining_bytes();
-            let mut line = format!("Noch {} {} · {}", files, if files == 1 { "Datei" } else { "Dateien" }, human_size(bytes as i64));
-            if speed > 1.0 && bytes > 0 {
-                line.push_str(&format!(" · {}", eta(bytes as f64 / speed)));
-            }
-            ui.label(RichText::new(line).color(TEXT));
-            for q in p.queue.iter().take(3) {
-                ui.horizontal(|ui| {
-                    let (r, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-                    paint_icon_at(ui.painter(), r, if q.upload { Icon::Up } else { Icon::Down }, TEXT_DIM);
-                    let name = q.path.rsplit('/').next().unwrap_or(&q.path);
-                    ui.add(egui::Label::new(RichText::new(format!("{name} · {}", human_size(q.size as i64))).size(11.0).color(TEXT_DIM)).truncate());
-                });
-            }
-            if p.queue.len() > 3 {
-                ui.label(RichText::new(format!("und {} weitere", p.queue.len() - 3)).size(11.0).color(TEXT_DIM));
+            ui.label(theme::label(text));
+            if let Some(f) = right {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| f(ui));
             }
         });
     });
+    ui.painter().hline(full.x_range(), ui.cursor().top(), Stroke::new(1.0, BORDER));
 }
 
-fn user_row(ui: &mut egui::Ui, u: &UserInfo, view: &mut AdminView, acc: &Account, ctx: &egui::Context) {
-    egui::Frame::new().fill(RAISED).corner_radius(4).inner_margin(10).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(&u.username).color(TEXT).strong());
-            if u.is_admin {
-                ui.label(RichText::new("ADMIN").size(10.0).strong().color(ACCENT));
+/// Ganze Zeile zum Anklicken (Konto-Tab).
+fn list_row(ui: &mut egui::Ui, icon: Icon, text: &str, color: Color32, icon_color: Color32) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::click());
+    let p = ui.painter();
+    if resp.hovered() {
+        p.rect_filled(r, 0.0, RAISED);
+    }
+    p.hline(r.x_range(), r.bottom() - 0.5, Stroke::new(1.0, RAISED));
+    paint_icon_at(p, Rect::from_center_size(Pos2::new(r.left() + 20.0, r.center().y), Vec2::splat(16.0)), icon, icon_color);
+    p.text(Pos2::new(r.left() + 38.0, r.center().y), egui::Align2::LEFT_CENTER, text, egui::FontId::proportional(13.0), color);
+    resp
+}
+
+/// Einstellungszeile: Text links, Bedienelement rechts.
+fn setting_row(ui: &mut egui::Ui, text: &str, sub: Option<&str>, add: impl FnOnce(&mut egui::Ui)) {
+    let h = if sub.is_some() { 50.0 } else { 44.0 };
+    let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::hover());
+    let p = ui.painter();
+    p.hline(r.x_range(), r.bottom() - 0.5, Stroke::new(1.0, RAISED));
+    if let Some(sub) = sub {
+        p.text(Pos2::new(r.left() + 12.0, r.center().y - 8.0), egui::Align2::LEFT_CENTER, text, egui::FontId::proportional(13.0), TEXT);
+        p.text(Pos2::new(r.left() + 12.0, r.center().y + 9.0), egui::Align2::LEFT_CENTER, sub, egui::FontId::proportional(10.5), TEXT_DIM);
+    } else {
+        p.text(Pos2::new(r.left() + 12.0, r.center().y), egui::Align2::LEFT_CENTER, text, egui::FontId::proportional(13.0), TEXT);
+    }
+    let right = Rect::from_min_max(Pos2::new(r.center().x, r.top()), Pos2::new(r.right() - 12.0, r.bottom()));
+    let mut c = ui.new_child(egui::UiBuilder::new().max_rect(right).layout(egui::Layout::right_to_left(egui::Align::Center)));
+    add(&mut c);
+}
+
+/// Kleines Etikett in der Freigabe-Zeile.
+fn chip(ui: &mut egui::Ui, icon: Icon, text: &str, fg: Color32, bg: Color32) {
+    let font = egui::FontId::proportional(10.5);
+    let g = ui.painter().layout_no_wrap(text.to_string(), font, fg);
+    let (r, _) = ui.allocate_exact_size(Vec2::new(g.size().x + 23.0, 18.0), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(r, 4.0, bg);
+    paint_icon_at(p, Rect::from_center_size(Pos2::new(r.left() + 10.0, r.center().y), Vec2::splat(10.0)), icon, fg);
+    p.galley(Pos2::new(r.left() + 18.0, r.center().y - g.size().y / 2.0), g, fg);
+}
+
+fn share_row(ui: &mut egui::Ui, view: &mut SharesView, sh: &Share, url: &str, acc: &Account, ctx: &egui::Context) {
+    let open = view.expanded.as_deref() == Some(sh.token.as_str());
+    let width = ui.available_width();
+    let (row, resp) = ui.allocate_exact_size(Vec2::new(width, 56.0), Sense::click());
+    let p = ui.painter().clone();
+    if resp.hovered() && !open {
+        p.rect_filled(row, 0.0, RAISED);
+    }
+    let name = sh.path.rsplit('/').next().unwrap_or(&sh.path).to_string();
+    let is_file = name.contains('.') && !sh.path.ends_with('/');
+    let ic = Rect::from_min_size(Pos2::new(row.left() + 12.0, row.center().y - 16.0), Vec2::splat(32.0));
+    p.rect_filled(ic, 4.0, BG);
+    paint_icon_at(&p, Rect::from_center_size(ic.center(), Vec2::splat(16.0)), if is_file { Icon::File } else { Icon::Folder }, ACCENT);
+    let chev = Rect::from_center_size(Pos2::new(row.right() - 22.0, row.center().y), Vec2::new(24.0, 32.0));
+    let copy = Rect::from_center_size(Pos2::new(chev.left() - 18.0, row.center().y), Vec2::splat(32.0));
+    let text_r = Rect::from_min_max(Pos2::new(ic.right() + 10.0, row.top() + 8.0), Pos2::new(copy.left() - 8.0, row.bottom() - 6.0));
+    let mut t = ui.new_child(egui::UiBuilder::new().max_rect(text_r).layout(egui::Layout::top_down(egui::Align::Min)));
+    t.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+    t.add(egui::Label::new(RichText::new(&name).color(TEXT)).truncate().selectable(false)).on_hover_text(&sh.path);
+    t.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        if sh.allow_upload {
+            chip(ui, Icon::Upload, "Upload", ACCENT, ACCENT_DIM);
+        }
+        if sh.has_password {
+            chip(ui, Icon::Lock, "Passwort", TEXT_DIM, RAISED);
+        }
+        if let Some(at) = sh.expires_at {
+            let left = at - chrono::Utc::now().timestamp_millis();
+            let (txt, c) = if left <= 0 {
+                ("abgelaufen".to_string(), DANGER)
+            } else if left < 86_400_000 {
+                ("läuft heute ab".to_string(), WARN)
+            } else {
+                (format!("noch {} Tage", left / 86_400_000), TEXT_DIM)
+            };
+            chip(ui, Icon::Clock, &txt, c, RAISED);
+        }
+        if sh.notify {
+            chip(ui, Icon::Bell, "", TEXT_DIM, RAISED);
+        }
+    });
+    if icon_button(ui, copy, Icon::Copy, "Link kopieren", false, &sh.token).clicked() && copy_to_clipboard(url) {
+        view.info = Some((true, format!("Link für „{name}“ kopiert")));
+    }
+    paint_icon_at(&p, Rect::from_center_size(chev.center(), Vec2::splat(14.0)), if open { Icon::Chevron } else { Icon::ChevronRight }, TEXT_DIM);
+    if resp.clicked() {
+        view.expanded = if open { None } else { Some(sh.token.clone()) };
+        view.pw_edit = None;
+        view.confirm_delete = None;
+    }
+
+    if open {
+        egui::Frame::new().outer_margin(egui::Margin { left: 12, right: 12, top: 0, bottom: 12 }).inner_margin(egui::Margin::symmetric(12, 6)).fill(RAISED).corner_radius(4).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.add(egui::Label::new(RichText::new(url).size(10.5).color(ACCENT)).truncate());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.link(RichText::new("Öffnen").size(11.0).color(ACCENT)).clicked() {
+                        open_url(url);
+                    }
+                });
+            });
+            let line = |ui: &mut egui::Ui| {
+                let y = ui.cursor().top();
+                ui.painter().hline(ui.max_rect().x_range(), y, Stroke::new(1.0, BORDER));
+            };
+            line(ui);
+            let row = |ui: &mut egui::Ui, icon: Icon, text: &str, add: &mut dyn FnMut(&mut egui::Ui)| {
+                ui.horizontal(|ui| {
+                    ui.set_min_height(32.0);
+                    paint_icon(ui, icon, TEXT_DIM);
+                    ui.label(RichText::new(text).color(TEXT));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| add(ui));
+                });
+            };
+            let mut upd: Option<ShareSettings> = None;
+            row(ui, Icon::Upload, "Gäste dürfen hochladen", &mut |ui| {
+                let mut v = sh.allow_upload;
+                if toggle(ui, &mut v).changed() {
+                    upd = Some(ShareSettings { allow_upload: Some(v), ..Default::default() });
+                }
+            });
+            row(ui, Icon::Bell, "Benachrichtigen", &mut |ui| {
+                let mut v = sh.notify;
+                if toggle(ui, &mut v).changed() {
+                    upd = Some(ShareSettings { notify: Some(v), ..Default::default() });
+                }
+            });
+            let editing = view.pw_edit.as_ref().map(|(t, _)| t == &sh.token).unwrap_or(false);
+            let mut start_edit = false;
+            row(ui, Icon::Lock, "Passwort", &mut |ui| {
+                if editing {
+                    return;
+                }
+                if sh.has_password && ui.link(RichText::new("Entfernen").size(12.0).color(DANGER)).clicked() {
+                    upd = Some(ShareSettings { password: Some(String::new()), ..Default::default() });
+                }
+                if ui.link(RichText::new(if sh.has_password { "Ändern" } else { "Festlegen" }).size(12.0).color(ACCENT)).clicked() {
+                    start_edit = true;
+                }
+            });
+            if start_edit {
+                view.pw_edit = Some((sh.token.clone(), String::new()));
+            }
+            let mut save_pw: Option<String> = None;
+            let mut cancel_pw = false;
+            if let Some((t, pw)) = view.pw_edit.as_mut() {
+                if t == &sh.token {
+                    ui.horizontal(|ui| {
+                        let r = ui.add(egui::TextEdit::singleline(pw).password(true).hint_text("mind. 4 Zeichen").desired_width(150.0));
+                        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if (ui.add_enabled(pw.len() >= 4, egui::Button::new("Speichern")).clicked() || enter) && pw.len() >= 4 {
+                            save_pw = Some(pw.clone());
+                        }
+                        if ui.button("Abbrechen").clicked() {
+                            cancel_pw = true;
+                        }
+                    });
+                }
+            }
+            if cancel_pw {
+                view.pw_edit = None;
+            }
+            if let Some(pw) = save_pw {
+                view.pw_edit = None;
+                upd = Some(ShareSettings { password: Some(pw), ..Default::default() });
+            }
+            row(ui, Icon::Clock, "Gültig", &mut |ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                for (label, days) in [("30 T", 30i64), ("7 T", 7), ("1 T", 1), ("Immer", 0)] {
+                    let sel = days == 0 && sh.expires_at.is_none();
+                    let b = egui::Button::new(RichText::new(label).size(11.0).color(if sel { ACCENT } else { TEXT_DIM }))
+                        .fill(if sel { ACCENT_DIM } else { BG })
+                        .min_size(Vec2::new(36.0, 24.0))
+                        .corner_radius(0);
+                    if ui.add(b).clicked() {
+                        let at = if days == 0 { 0 } else { chrono::Utc::now().timestamp_millis() + days * 86_400_000 };
+                        upd = Some(ShareSettings { expires_at: Some(at), ..Default::default() });
+                    }
+                }
+            });
+            if let Some(at) = sh.expires_at {
+                ui.label(RichText::new(expiry_text(at)).size(10.5).color(TEXT_DIM));
+            }
+            ui.add_space(4.0);
+            ui.horizontal(|ui| ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if view.confirm_delete.as_deref() == Some(sh.token.as_str()) {
+                    if ui.add(egui::Button::new(RichText::new("Wirklich beenden").color(TEXT)).fill(DANGER)).clicked() {
+                        view.confirm_delete = None;
+                        view.expanded = None;
+                        shares_delete(view, acc, ctx, sh.token.clone());
+                    }
+                    if ui.button("Abbrechen").clicked() {
+                        view.confirm_delete = None;
+                    }
+                } else if ui.add(egui::Button::new(RichText::new("Freigabe beenden").color(DANGER)).fill(BG)).clicked() {
+                    view.confirm_delete = Some(sh.token.clone());
+                }
+            }));
+            if let Some(s) = upd {
+                shares_update(view, acc, ctx, sh.token.clone(), s);
             }
         });
-        let frac = if u.quota_bytes > 0 { (u.used_bytes as f32 / u.quota_bytes as f32).clamp(0.0, 1.0) } else { 0.0 };
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 4.0), Sense::hover());
-        ui.painter().rect_filled(rect, 2.0, SURFACE);
-        let mut fill = rect;
-        fill.set_width(rect.width() * frac);
-        ui.painter().rect_filled(fill, 2.0, if frac > 0.95 { DANGER } else { ACCENT });
-        ui.label(RichText::new(format!("{} von {} belegt", human_size(u.used_bytes), human_size(u.quota_bytes))).size(11.0).color(TEXT_DIM));
+    }
+    let y = ui.cursor().top();
+    ui.painter().hline(ui.max_rect().x_range(), y - 0.5, Stroke::new(1.0, BORDER));
+}
 
-        let editing = view.edit.as_ref().map(|e| e.0) == Some(u.id);
-        if editing {
-            let (_, gb, pw) = view.edit.as_mut().unwrap();
-            egui::Grid::new(("edit", u.id)).num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+fn transfer_panel(ui: &mut egui::Ui, p: &Progress, speed: f64) {
+    let files = p.remaining_files();
+    let bytes = p.remaining_bytes();
+    ui.label(
+        RichText::new(format!("{} {} werden synchronisiert", files, if files == 1 { "Datei" } else { "Dateien" }))
+            .size(15.0)
+            .color(ACCENT),
+    );
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let dir = p.current.as_ref().map(|c| c.upload).unwrap_or(true);
+        paint_small(ui, if dir { Icon::Up } else { Icon::Down });
+        ui.label(RichText::new(if speed > 1.0 { format!("{}/s", human_size(speed as i64)) } else { "–".into() }).size(10.5).color(TEXT_DIM));
+        ui.add_space(10.0);
+        paint_small(ui, Icon::Clock);
+        let rest = if speed > 1.0 && bytes > 0 { eta(bytes as f64 / speed) } else { human_size(bytes as i64) };
+        ui.label(RichText::new(rest).size(10.5).color(TEXT_DIM));
+    });
+    ui.add_space(2.0);
+    if let Some(c) = &p.current {
+        let frac = if c.total > 0 { (c.done as f32 / c.total as f32).clamp(0.0, 1.0) } else { 1.0 };
+        let name = c.path.rsplit('/').next().unwrap_or(&c.path);
+        let detail = if c.done == 0 && c.upload { "wird geprüft".to_string() } else { format!("{} / {}", human_size(c.done as i64), human_size(c.total as i64)) };
+        transfer_row(ui, name, &c.path, &detail, frac, c.upload);
+    }
+    for q in p.queue.iter().take(2) {
+        let name = q.path.rsplit('/').next().unwrap_or(&q.path);
+        transfer_row(ui, name, &q.path, &human_size(q.size as i64), 0.0, q.upload);
+    }
+    if p.queue.len() > 2 {
+        ui.label(RichText::new(format!("und {} weitere", p.queue.len() - 2)).size(10.5).color(TEXT_DIM));
+    }
+}
+
+fn paint_small(ui: &mut egui::Ui, icon: Icon) {
+    let (r, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+    paint_icon_at(ui.painter(), r, icon, TEXT_DIM);
+}
+
+fn transfer_row(ui: &mut egui::Ui, name: &str, path: &str, detail: &str, frac: f32, upload: bool) {
+    let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::hover());
+    let _ = resp.on_hover_text(path);
+    let p = ui.painter();
+    let ic = Rect::from_min_size(Pos2::new(r.left(), r.center().y - 16.0), Vec2::splat(32.0));
+    p.rect_filled(ic, 4.0, RAISED);
+    paint_icon_at(p, Rect::from_center_size(ic.center(), Vec2::splat(16.0)), file_icon(name), TEXT_DIM);
+    let dir_r = Rect::from_center_size(Pos2::new(r.right() - 7.0, r.center().y), Vec2::splat(14.0));
+    paint_icon_at(p, dir_r, if upload { Icon::Up } else { Icon::Down }, ACCENT);
+    let tx = ic.right() + 10.0;
+    let tw = dir_r.left() - 10.0 - tx;
+    let dg = p.layout_no_wrap(detail.to_string(), egui::FontId::proportional(10.5), TEXT_DIM);
+    let dw = dg.size().x;
+    p.galley(Pos2::new(tx + tw - dw, r.center().y - 13.0), dg, TEXT_DIM);
+    let clip = p.with_clip_rect(Rect::from_min_max(Pos2::new(tx, r.top()), Pos2::new(tx + tw - dw - 8.0, r.bottom())));
+    clip.text(Pos2::new(tx, r.center().y - 6.0), egui::Align2::LEFT_CENTER, name, egui::FontId::proportional(13.0), TEXT);
+    let bar = Rect::from_min_size(Pos2::new(tx, r.center().y + 7.0), Vec2::new(tw, 4.0));
+    p.rect_filled(bar, 2.0, BG);
+    let mut fill = bar;
+    fill.set_width(bar.width() * frac);
+    p.rect_filled(fill, 2.0, ACCENT);
+}
+
+fn file_icon(name: &str) -> Icon {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
+    match ext.as_str() {
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "heic" | "bmp" => Icon::Image,
+        "mp4" | "mov" | "mkv" | "webm" | "avi" | "mp3" | "wav" | "flac" | "m4a" | "ogg" => Icon::Media,
+        _ => Icon::File,
+    }
+}
+
+fn admin_section(ui: &mut egui::Ui, view: &mut AdminView, acc: &Account, ctx: &egui::Context) {
+    let msg = view.inbox.lock().unwrap().take();
+    if let Some(msg) = msg {
+        view.loading = false;
+        match msg {
+            AdminMsg::Users(u) => view.users = u,
+            AdminMsg::Done(m) => {
+                view.info = Some((true, m));
+                admin_reload(view, acc, ctx);
+            }
+            AdminMsg::Failed(m) => view.info = Some((false, m)),
+        }
+    }
+    let mut toggle_add = false;
+    let adding = view.adding;
+    let loading = view.loading;
+    section_label(
+        ui,
+        "Benutzer auf diesem Server",
+        Some(&mut |ui: &mut egui::Ui| {
+            if ui.link(RichText::new(if adding { "Abbrechen" } else { "+ Neu" }).size(12.0).color(ACCENT)).clicked() {
+                toggle_add = true;
+            }
+            if loading {
+                ui.add(egui::Spinner::new().size(12.0).color(TEXT_DIM));
+            }
+        }),
+    );
+    if toggle_add {
+        view.adding = !view.adding;
+    }
+    if view.adding {
+        egui::Frame::new().outer_margin(egui::Margin { left: 12, right: 12, top: 8, bottom: 8 }).inner_margin(10).fill(RAISED).corner_radius(4).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            egui::Grid::new("new_user").num_columns(2).spacing([10.0, 8.0]).min_col_width(70.0).show(ui, |ui| {
+                ui.label(RichText::new("Name").color(TEXT_DIM));
+                ui.add(egui::TextEdit::singleline(&mut view.new_name).desired_width(f32::INFINITY));
+                ui.end_row();
+                ui.label(RichText::new("Passwort").color(TEXT_DIM));
+                ui.add(egui::TextEdit::singleline(&mut view.new_pw).password(true).hint_text("mind. 10 Zeichen").desired_width(f32::INFINITY));
+                ui.end_row();
                 ui.label(RichText::new("Speicher").color(TEXT_DIM));
                 ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(gb).desired_width(60.0));
+                    ui.add(egui::TextEdit::singleline(&mut view.new_gb).desired_width(60.0));
                     ui.label("GB");
                 });
                 ui.end_row();
-                ui.label(RichText::new("Neues Passwort").color(TEXT_DIM));
-                ui.add(egui::TextEdit::singleline(pw).password(true).hint_text("leer = unverändert").desired_width(f32::INFINITY));
-                ui.end_row();
             });
-            let gb_val = parse_gb(gb);
-            let pw_val = if pw.is_empty() { None } else { Some(pw.clone()) };
-            let valid = gb_val.is_some() && pw_val.as_ref().map(|p| p.len() >= 10).unwrap_or(true);
-            ui.horizontal(|ui| {
-                if ui.add_enabled(valid, egui::Button::new(theme::button_text("Speichern").color(BG)).fill(ACCENT)).clicked() {
-                    let (id, name) = (u.id, u.username.clone());
-                    let q = gb_val;
-                    view.edit = None;
-                    admin_run(view, acc, ctx, move |api| api.update_user(id, q, pw_val.as_deref()).map(|_| format!("„{name}“ gespeichert")));
-                }
-                if ui.button(theme::button_text("Abbrechen")).clicked() {
-                    view.edit = None;
-                }
+            let gb = parse_gb(&view.new_gb);
+            let valid = view.new_name.trim().len() >= 3 && view.new_pw.len() >= 10 && gb.is_some() && !view.loading;
+            if ui.add_enabled(valid, egui::Button::new(theme::button_text("Anlegen").color(BG)).fill(ACCENT)).clicked() {
+                let (name, pw, gb) = (view.new_name.trim().to_string(), view.new_pw.clone(), gb.unwrap_or(0.0));
+                view.new_name.clear();
+                view.new_pw.clear();
+                view.adding = false;
+                admin_run(view, acc, ctx, move |api| api.create_user(&name, &pw, gb, false).map(|_| format!("„{name}“ angelegt ({} GB)", fmt_gb(gb))));
+            }
+        });
+    }
+    if let Some((ok, m)) = &view.info {
+        egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 6)).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                paint_icon(ui, if *ok { Icon::Check } else { Icon::Warning }, if *ok { OK } else { DANGER });
+                ui.label(RichText::new(m).color(TEXT_DIM));
             });
-        } else if !u.is_admin {
+        });
+    }
+    let users = view.users.clone();
+    for u in &users {
+        user_row(ui, u, view, acc, ctx);
+    }
+}
+
+fn user_row(ui: &mut egui::Ui, u: &UserInfo, view: &mut AdminView, acc: &Account, ctx: &egui::Context) {
+    let editing = view.edit.as_ref().map(|e| e.0) == Some(u.id);
+    let sense = if u.is_admin { Sense::hover() } else { Sense::click() };
+    let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), sense);
+    let p = ui.painter();
+    if resp.hovered() && !u.is_admin {
+        p.rect_filled(r, 0.0, RAISED);
+    }
+    p.hline(r.x_range(), r.bottom() - 0.5, Stroke::new(1.0, RAISED));
+    let av = Rect::from_min_size(Pos2::new(r.left() + 12.0, r.center().y - 13.0), Vec2::splat(26.0));
+    p.rect_filled(av, 4.0, RAISED);
+    p.text(av.center(), egui::Align2::CENTER_CENTER, u.username.chars().next().unwrap_or('?').to_uppercase().to_string(), egui::FontId::proportional(11.0), TEXT_DIM);
+    let ng = p.layout_no_wrap(u.username.clone(), egui::FontId::proportional(13.0), TEXT);
+    let nw = ng.size().x;
+    p.galley(Pos2::new(av.right() + 10.0, r.center().y - ng.size().y / 2.0), ng, TEXT);
+    if u.is_admin {
+        p.text(Pos2::new(av.right() + 16.0 + nw, r.center().y), egui::Align2::LEFT_CENTER, "Admin", egui::FontId::proportional(10.5), ACCENT);
+    }
+    p.text(
+        Pos2::new(r.right() - if u.is_admin { 12.0 } else { 30.0 }, r.center().y),
+        egui::Align2::RIGHT_CENTER,
+        format!("{} / {}", human_size(u.used_bytes), human_size(u.quota_bytes)),
+        egui::FontId::proportional(10.5),
+        TEXT_DIM,
+    );
+    if !u.is_admin {
+        paint_icon_at(p, Rect::from_center_size(Pos2::new(r.right() - 16.0, r.center().y), Vec2::splat(14.0)), if editing { Icon::Chevron } else { Icon::ChevronRight }, TEXT_FAINT);
+    }
+    if resp.clicked() {
+        view.edit = if editing { None } else { Some((u.id, fmt_gb(u.quota_bytes as f64 / 1024f64.powi(3)), String::new())) };
+        view.confirm_delete = None;
+    }
+    if !editing {
+        return;
+    }
+    egui::Frame::new().outer_margin(egui::Margin { left: 12, right: 12, top: 0, bottom: 8 }).inner_margin(10).fill(RAISED).corner_radius(4).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let (_, gb, pw) = view.edit.as_mut().unwrap();
+        egui::Grid::new(("edit", u.id)).num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+            ui.label(RichText::new("Speicher").color(TEXT_DIM));
             ui.horizontal(|ui| {
-                if ui.small_button("Bearbeiten").clicked() {
-                    view.edit = Some((u.id, fmt_gb(u.quota_bytes as f64 / 1024f64.powi(3)), String::new()));
-                    view.confirm_delete = None;
-                }
+                ui.add(egui::TextEdit::singleline(gb).desired_width(60.0));
+                ui.label("GB");
+            });
+            ui.end_row();
+            ui.label(RichText::new("Neues Passwort").color(TEXT_DIM));
+            ui.add(egui::TextEdit::singleline(pw).password(true).hint_text("leer = unverändert").desired_width(f32::INFINITY));
+            ui.end_row();
+        });
+        let gb_val = parse_gb(gb);
+        let pw_val = if pw.is_empty() { None } else { Some(pw.clone()) };
+        let valid = gb_val.is_some() && pw_val.as_ref().map(|p| p.len() >= 10).unwrap_or(true);
+        ui.horizontal(|ui| {
+            if ui.add_enabled(valid, egui::Button::new(theme::button_text("Speichern").color(BG)).fill(ACCENT)).clicked() {
+                let (id, name) = (u.id, u.username.clone());
+                view.edit = None;
+                admin_run(view, acc, ctx, move |api| api.update_user(id, gb_val, pw_val.as_deref()).map(|_| format!("„{name}“ gespeichert")));
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if view.confirm_delete == Some(u.id) {
-                    if ui.small_button(RichText::new("Wirklich löschen (inkl. aller Dateien)").color(DANGER)).clicked() {
+                    if ui.add(egui::Button::new(RichText::new("Wirklich löschen").color(TEXT)).fill(DANGER)).on_hover_text("Löscht auch alle Dateien des Benutzers").clicked() {
                         let (id, name) = (u.id, u.username.clone());
                         view.confirm_delete = None;
+                        view.edit = None;
                         admin_run(view, acc, ctx, move |api| api.delete_user(id).map(|_| format!("„{name}“ gelöscht")));
                     }
-                } else if ui.small_button(RichText::new("Löschen").color(DANGER)).clicked() {
+                } else if ui.add(egui::Button::new(RichText::new("Löschen").color(DANGER)).fill(BG)).clicked() {
                     view.confirm_delete = Some(u.id);
                 }
             });
-        }
+        });
     });
-    ui.add_space(4.0);
 }
 
 fn shares_spawn(view: &mut SharesView, acc: &Account, ctx: &egui::Context, f: impl FnOnce(&Api) -> Result<SharesMsg, ApiError> + Send + 'static) {
@@ -1381,7 +1649,7 @@ fn shares_reload(view: &mut SharesView, acc: &Account, ctx: &egui::Context) {
 fn shares_create(view: &mut SharesView, acc: &Account, ctx: &egui::Context, remote: String) {
     view.info = None;
     shares_spawn(view, acc, ctx, move |api| match api.create_share(&remote) {
-        Ok(s) => Ok(SharesMsg::Created(api.share_url(&s.token))),
+        Ok(s) => Ok(SharesMsg::Created(api.share_url(&s.token), s.token.clone())),
         Err(ApiError::NotFound) => Ok(SharesMsg::Failed("Noch nicht auf dem Server – bitte warten, bis es hochgeladen ist.".into())),
         Err(e) => Err(e),
     });
@@ -1530,27 +1798,6 @@ fn phase_text(phase: &Phase, last_sync: Option<chrono::DateTime<chrono::Local>>)
     }
 }
 
-fn account_tab(ui: &mut egui::Ui, name: &str, dot: Color32, selected: bool) -> egui::Response {
-    let font = egui::FontId::proportional(13.0);
-    let galley = ui.painter().layout_no_wrap(name.to_string(), font, TEXT);
-    let size = Vec2::new(galley.size().x + 32.0, 28.0);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    let fill = if selected {
-        ACCENT_DIM
-    } else if resp.hovered() {
-        RAISED_HOVER
-    } else {
-        RAISED
-    };
-    ui.painter().rect_filled(rect, 4.0, fill);
-    if selected {
-        ui.painter().rect_stroke(rect, 4.0, Stroke::new(1.0, ACCENT), egui::StrokeKind::Inside);
-    }
-    ui.painter().circle_filled(Pos2::new(rect.left() + 13.0, rect.center().y), 4.0, dot);
-    ui.painter().galley(Pos2::new(rect.left() + 24.0, rect.center().y - galley.size().y / 2.0), galley, TEXT);
-    resp
-}
-
 fn normalize_server(s: &str) -> String {
     let s = s.trim().trim_end_matches('/');
     if s.starts_with("http://") || s.starts_with("https://") {
@@ -1604,30 +1851,40 @@ fn footer_band(ui: &mut egui::Ui, h: f32, add: impl FnOnce(&mut egui::Ui)) {
 
 fn activity_row(ui: &mut egui::Ui, ev: &dropcraft_core::Event) {
     let (icon, color, verb) = match ev.kind {
-        EventKind::Uploaded => (Icon::Up, ACCENT, "Hochgeladen"),
-        EventKind::Downloaded => (Icon::Down, OK, "Heruntergeladen"),
-        EventKind::NewOnline => (Icon::Down, TEXT_DIM, "Neu, nur online"),
-        EventKind::DeletedLocal => (Icon::Trash, TEXT_DIM, "Hier gelöscht"),
-        EventKind::DeletedRemote => (Icon::Trash, TEXT_DIM, "Gelöscht"),
+        EventKind::Uploaded => (Icon::Up, ACCENT, "hochgeladen"),
+        EventKind::Downloaded => (Icon::Down, OK, "heruntergeladen"),
+        EventKind::NewOnline => (Icon::Cloud, TEXT_DIM, "nur online"),
+        EventKind::DeletedLocal => (Icon::Trash, TEXT_DIM, "hier gelöscht"),
+        EventKind::DeletedRemote => (Icon::Trash, TEXT_DIM, "gelöscht"),
         EventKind::Conflict => (Icon::Warning, WARN, "Konflikt"),
         EventKind::Error => (Icon::Warning, DANGER, "Fehler"),
     };
     let name = ev.path.rsplit('/').next().unwrap_or(&ev.path);
-    let when = if ev.at.date_naive() == chrono::Local::now().date_naive() { ev.at.format("%H:%M").to_string() } else { ev.at.format("%d.%m. %H:%M").to_string() };
-    let mut detail = if ev.detail.is_empty() { format!("{verb} · {when}") } else { format!("{verb} · {} · {when}", ev.detail) };
-    if let Some(by) = &ev.by {
-        detail.push_str(&format!(" · von {by}"));
+    let when = if ev.at.date_naive() == chrono::Local::now().date_naive() { ev.at.format("%H:%M").to_string() } else { ev.at.format("%d.%m.").to_string() };
+    let who = match &ev.by {
+        Some(by) if matches!(ev.kind, EventKind::Downloaded | EventKind::NewOnline | EventKind::DeletedLocal) => by.clone(),
+        _ => verb.to_string(),
+    };
+    let detail = format!("{who} · {when}");
+    let mut hover = format!("{}\n{verb}", ev.path);
+    if !ev.detail.is_empty() {
+        hover.push_str(&format!(" · {}", ev.detail));
     }
-    ui.horizontal(|ui| {
-        ui.set_min_height(44.0);
-        let (rect, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
-        ui.painter().rect_filled(rect, 4.0, RAISED);
-        paint_icon_at(ui.painter(), rect.shrink(6.0), icon, color);
-        ui.vertical(|ui| {
-            ui.add(egui::Label::new(RichText::new(name).color(TEXT)).truncate()).on_hover_text(&ev.path);
-            ui.add(egui::Label::new(RichText::new(detail).size(11.0).color(TEXT_DIM)).truncate());
-        });
-    });
+    if let Some(by) = &ev.by {
+        hover.push_str(&format!(" · von {by}"));
+    }
+    let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 40.0), Sense::hover());
+    let _ = resp.on_hover_text(hover);
+    let p = ui.painter();
+    p.hline(r.x_range(), r.bottom() - 0.5, Stroke::new(1.0, RAISED));
+    paint_icon_at(p, Rect::from_center_size(Pos2::new(r.left() + 19.0, r.center().y), Vec2::splat(14.0)), icon, color);
+    let dg = p.layout_no_wrap(detail, egui::FontId::proportional(10.5), TEXT_DIM);
+    let dw = dg.size().x;
+    let dx = r.right() - 12.0 - dw;
+    p.galley(Pos2::new(dx, r.center().y - dg.size().y / 2.0), dg, TEXT_DIM);
+    let tx = r.left() + 36.0;
+    let clip = p.with_clip_rect(Rect::from_min_max(Pos2::new(tx, r.top()), Pos2::new(dx - 10.0, r.bottom())));
+    clip.text(Pos2::new(tx, r.center().y), egui::Align2::LEFT_CENTER, name, egui::FontId::proportional(13.0), TEXT);
 }
 
 /// Ein-/Aus-Schalter (statt Checkbox).
@@ -1650,11 +1907,31 @@ enum Icon {
     Check,
     Sync,
     Pause,
+    Play,
     Warning,
     Offline,
     Up,
     Down,
     Trash,
+    Folder,
+    File,
+    Image,
+    Media,
+    Chevron,
+    ChevronRight,
+    Pulse,
+    Link,
+    User,
+    Gear,
+    Copy,
+    Upload,
+    Lock,
+    Clock,
+    Bell,
+    Plus,
+    Logout,
+    Power,
+    Cloud,
 }
 
 fn paint_icon(ui: &mut egui::Ui, icon: Icon, color: Color32) {
@@ -1662,46 +1939,90 @@ fn paint_icon(ui: &mut egui::Ui, icon: Icon, color: Color32) {
     paint_icon_at(ui.painter(), rect, icon, color);
 }
 
+/// Linien-Symbole im 16er-Raster (Stil wie Phosphor).
 fn paint_icon_at(p: &egui::Painter, r: Rect, icon: Icon, color: Color32) {
-    let s = Stroke::new(1.5, color);
-    let at = |x: f32, y: f32| Pos2::new(r.left() + r.width() * x, r.top() + r.height() * y);
-    match icon {
-        Icon::Check => {
-            p.circle_stroke(r.center(), r.width() * 0.42, s);
-            p.line(vec![at(0.32, 0.52), at(0.45, 0.65), at(0.68, 0.38)], s);
+    let k = r.width() / 16.0;
+    let s = Stroke::new((1.4 * k).max(1.1), color);
+    let at = |x: f32, y: f32| Pos2::new(r.left() + x * k, r.top() + y * k);
+    let poly = |pts: &[(f32, f32)]| pts.iter().map(|&(x, y)| at(x, y)).collect::<Vec<_>>();
+    let closed = |pts: &[(f32, f32)]| egui::Shape::closed_line(poly(pts), s);
+    let line = |pts: &[(f32, f32)]| egui::Shape::line(poly(pts), s);
+    let circle = |x: f32, y: f32, rad: f32| egui::Shape::circle_stroke(at(x, y), rad * k, s);
+    let rect = |x0: f32, y0: f32, x1: f32, y1: f32, rr: f32| egui::Shape::rect_stroke(Rect::from_min_max(at(x0, y0), at(x1, y1)), rr * k, s, egui::StrokeKind::Middle);
+    let arc = |cx: f32, cy: f32, rad: f32, a0: f32, a1: f32| {
+        let n = 16;
+        let pts: Vec<Pos2> = (0..=n).map(|i| {
+            let a = a0 + (a1 - a0) * i as f32 / n as f32;
+            at(cx + rad * a.cos(), cy + rad * a.sin())
+        }).collect();
+        egui::Shape::line(pts, s)
+    };
+    use std::f32::consts::PI;
+    let shapes: Vec<egui::Shape> = match icon {
+        Icon::Check => vec![circle(8.0, 8.0, 6.5), line(&[(5.0, 8.3), (7.2, 10.5), (11.0, 6.0)])],
+        Icon::Sync => vec![
+            arc(8.0, 8.0, 5.0, PI * 1.1, PI * 1.9),
+            line(&[(12.6, 3.0), (12.8, 5.6), (10.2, 5.8)]),
+            arc(8.0, 8.0, 5.0, PI * 0.1, PI * 0.9),
+            line(&[(3.4, 13.0), (3.2, 10.4), (5.8, 10.2)]),
+        ],
+        Icon::Pause => vec![line(&[(5.5, 3.5), (5.5, 12.5)]), line(&[(10.5, 3.5), (10.5, 12.5)])],
+        Icon::Play => vec![closed(&[(5.0, 3.0), (13.0, 8.0), (5.0, 13.0)])],
+        Icon::Warning => vec![
+            closed(&[(8.0, 1.8), (14.8, 14.0), (1.2, 14.0)]),
+            line(&[(8.0, 6.2), (8.0, 9.6)]),
+            egui::Shape::circle_filled(at(8.0, 11.8), 0.9 * k, color),
+        ],
+        Icon::Offline => vec![circle(8.0, 8.0, 6.3), line(&[(3.5, 3.5), (12.5, 12.5)])],
+        Icon::Up => vec![line(&[(8.0, 13.0), (8.0, 3.0)]), line(&[(4.0, 7.0), (8.0, 3.0), (12.0, 7.0)])],
+        Icon::Down => vec![line(&[(8.0, 3.0), (8.0, 13.0)]), line(&[(4.0, 9.0), (8.0, 13.0), (12.0, 9.0)])],
+        Icon::Trash => vec![
+            line(&[(2.5, 4.5), (13.5, 4.5)]),
+            line(&[(6.0, 4.5), (6.0, 2.5), (10.0, 2.5), (10.0, 4.5)]),
+            line(&[(4.0, 4.5), (4.8, 13.5), (11.2, 13.5), (12.0, 4.5)]),
+        ],
+        Icon::Folder => vec![closed(&[(1.8, 3.5), (6.0, 3.5), (7.5, 5.2), (14.2, 5.2), (14.2, 12.8), (1.8, 12.8)])],
+        Icon::File => vec![closed(&[(3.5, 1.5), (9.5, 1.5), (12.5, 4.5), (12.5, 14.5), (3.5, 14.5)]), line(&[(9.5, 1.5), (9.5, 4.5), (12.5, 4.5)])],
+        Icon::Image => vec![rect(2.0, 3.0, 14.0, 13.0, 1.0), circle(6.0, 6.5, 1.1), line(&[(2.5, 12.0), (6.0, 8.5), (8.5, 11.0), (10.5, 9.0), (13.5, 12.0)])],
+        Icon::Media => vec![rect(2.0, 3.0, 14.0, 13.0, 1.0), closed(&[(6.5, 6.0), (10.5, 8.0), (6.5, 10.0)])],
+        Icon::Chevron => vec![line(&[(4.0, 6.0), (8.0, 10.0), (12.0, 6.0)])],
+        Icon::ChevronRight => vec![line(&[(6.0, 4.0), (10.0, 8.0), (6.0, 12.0)])],
+        Icon::Pulse => vec![line(&[(1.5, 8.0), (4.5, 8.0), (6.5, 3.5), (9.5, 12.5), (11.5, 8.0), (14.5, 8.0)])],
+        Icon::Link => vec![
+            line(&[(6.3, 9.7), (9.7, 6.3)]),
+            line(&[(7.5, 4.6), (8.9, 3.2), (11.0, 2.6), (13.0, 3.6), (13.4, 5.0), (12.8, 7.0), (11.4, 8.4)]),
+            line(&[(8.5, 11.4), (7.1, 12.8), (5.0, 13.4), (3.0, 12.4), (2.6, 11.0), (3.2, 9.0), (4.6, 7.6)]),
+        ],
+        Icon::User => vec![circle(8.0, 5.5, 2.8), arc(8.0, 14.0, 5.2, PI, PI * 2.0)],
+        Icon::Gear => {
+            let mut v = vec![circle(8.0, 8.0, 2.3), circle(8.0, 8.0, 5.0)];
+            for i in 0..8 {
+                let a = i as f32 * PI / 4.0;
+                v.push(line(&[(8.0 + 5.0 * a.cos(), 8.0 + 5.0 * a.sin()), (8.0 + 6.8 * a.cos(), 8.0 + 6.8 * a.sin())]));
+            }
+            v
         }
-        Icon::Sync => {
-            p.circle_stroke(r.center(), r.width() * 0.38, s);
-            p.line(vec![at(0.72, 0.12), at(0.86, 0.3), at(0.66, 0.36)], s);
-        }
-        Icon::Pause => {
-            p.line_segment([at(0.36, 0.22), at(0.36, 0.78)], Stroke::new(2.0, color));
-            p.line_segment([at(0.64, 0.22), at(0.64, 0.78)], Stroke::new(2.0, color));
-        }
-        Icon::Warning => {
-            p.add(egui::Shape::closed_line(vec![at(0.5, 0.1), at(0.94, 0.88), at(0.06, 0.88)], s));
-            p.line_segment([at(0.5, 0.38), at(0.5, 0.6)], s);
-            p.circle_filled(at(0.5, 0.74), 1.0, color);
-        }
-        Icon::Offline => {
-            p.circle_stroke(r.center(), r.width() * 0.4, s);
-            p.line_segment([at(0.2, 0.2), at(0.8, 0.8)], s);
-        }
-        Icon::Up => {
-            p.line_segment([at(0.5, 0.12), at(0.5, 0.66)], s);
-            p.line(vec![at(0.28, 0.34), at(0.5, 0.12), at(0.72, 0.34)], s);
-            p.line(vec![at(0.12, 0.66), at(0.12, 0.88), at(0.88, 0.88), at(0.88, 0.66)], s);
-        }
-        Icon::Down => {
-            p.line_segment([at(0.5, 0.12), at(0.5, 0.66)], s);
-            p.line(vec![at(0.28, 0.44), at(0.5, 0.66), at(0.72, 0.44)], s);
-            p.line(vec![at(0.12, 0.66), at(0.12, 0.88), at(0.88, 0.88), at(0.88, 0.66)], s);
-        }
-        Icon::Trash => {
-            p.line_segment([at(0.12, 0.24), at(0.88, 0.24)], s);
-            p.line(vec![at(0.38, 0.24), at(0.38, 0.1), at(0.62, 0.1), at(0.62, 0.24)], s);
-            p.line(vec![at(0.24, 0.24), at(0.3, 0.9), at(0.7, 0.9), at(0.76, 0.24)], s);
-        }
+        Icon::Copy => vec![rect(5.5, 5.5, 13.5, 13.5, 1.0), line(&[(10.5, 5.5), (10.5, 2.5), (2.5, 2.5), (2.5, 10.5), (5.5, 10.5)])],
+        Icon::Upload => vec![line(&[(8.0, 10.5), (8.0, 2.5)]), line(&[(5.0, 5.5), (8.0, 2.5), (11.0, 5.5)]), line(&[(2.5, 10.5), (2.5, 13.5), (13.5, 13.5), (13.5, 10.5)])],
+        Icon::Lock => vec![rect(3.5, 7.0, 12.5, 13.5, 1.0), arc(8.0, 5.2, 2.5, PI, PI * 2.0), line(&[(5.5, 5.2), (5.5, 7.0)]), line(&[(10.5, 5.2), (10.5, 7.0)])],
+        Icon::Clock => vec![circle(8.0, 8.0, 6.0), line(&[(8.0, 4.5), (8.0, 8.0), (10.5, 9.5)])],
+        Icon::Bell => vec![
+            arc(8.0, 7.0, 4.0, PI, PI * 2.0),
+            line(&[(4.0, 7.0), (4.0, 11.5), (3.0, 12.5), (13.0, 12.5), (12.0, 11.5), (12.0, 7.0)]),
+            line(&[(6.8, 14.2), (9.2, 14.2)]),
+        ],
+        Icon::Plus => vec![line(&[(8.0, 3.0), (8.0, 13.0)]), line(&[(3.0, 8.0), (13.0, 8.0)])],
+        Icon::Logout => vec![line(&[(6.5, 2.5), (2.5, 2.5), (2.5, 13.5), (6.5, 13.5)]), line(&[(10.0, 5.0), (13.0, 8.0), (10.0, 11.0)]), line(&[(13.0, 8.0), (6.0, 8.0)])],
+        Icon::Power => vec![arc(8.0, 8.6, 5.4, -PI * 0.3, PI * 1.3), line(&[(8.0, 2.0), (8.0, 7.5)])],
+        Icon::Cloud => vec![
+            arc(5.0, 9.5, 3.0, PI * 0.5, PI * 1.45),
+            arc(8.3, 7.0, 4.0, PI * 1.05, PI * 1.85),
+            arc(11.8, 9.6, 2.9, PI * 1.5, PI * 2.5),
+            line(&[(5.0, 12.5), (11.8, 12.5)]),
+        ],
+    };
+    for sh in shapes {
+        p.add(sh);
     }
 }
 

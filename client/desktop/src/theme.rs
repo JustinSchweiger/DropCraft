@@ -11,6 +11,7 @@ pub const ACCENT: Color32 = Color32::from_rgb(0x19, 0xe3, 0xf0);
 pub const ACCENT_DIM: Color32 = Color32::from_rgb(0x0c, 0x5c, 0x64);
 pub const TEXT: Color32 = Color32::from_rgb(0xe6, 0xec, 0xf2);
 pub const TEXT_DIM: Color32 = Color32::from_rgb(0x95, 0xa2, 0xb0);
+pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x55, 0x60, 0x6c);
 pub const DANGER: Color32 = Color32::from_rgb(0xef, 0x44, 0x55);
 pub const OK: Color32 = Color32::from_rgb(0x34, 0xd3, 0x99);
 pub const WARN: Color32 = Color32::from_rgb(0xfb, 0xbf, 0x24);
