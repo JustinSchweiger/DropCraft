@@ -3,6 +3,7 @@
 
 mod app;
 mod config;
+mod folder_icon;
 mod theme;
 mod tray;
 mod worker;
@@ -28,10 +29,16 @@ fn main() -> eframe::Result {
 
     let icon = egui::IconData { rgba: tray::logo_rgba(64), width: 64, height: 64 };
     let options = eframe::NativeOptions {
+        // Unter Windows ein rahmenloses Popup über der Taskleiste, das erst
+        // beim Klick aufs Tray-Symbol erscheint.
         viewport: egui::ViewportBuilder::default()
             .with_title("DropCraft")
-            .with_inner_size([380.0, 580.0])
-            .with_min_inner_size([340.0, 440.0])
+            .with_inner_size([380.0, 600.0])
+            .with_resizable(false)
+            .with_decorations(false)
+            .with_taskbar(false)
+            .with_always_on_top()
+            .with_visible(cfg!(target_os = "linux"))
             .with_icon(Arc::new(icon)),
         ..Default::default()
     };

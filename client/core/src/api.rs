@@ -59,6 +59,16 @@ pub struct Me {
     pub cursor: i64,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct UserInfo {
+    pub id: i64,
+    pub username: String,
+    pub is_admin: bool,
+    pub quota_bytes: i64,
+    pub used_bytes: i64,
+    pub created_at: i64,
+}
+
 #[derive(Clone)]
 pub struct Api {
     base: String,
@@ -155,9 +165,22 @@ impl Api {
     /// Lädt eine Datei hoch. `base_rev`: 0 = darf noch nicht existieren,
     /// sonst die Revision, auf der die lokale Änderung basiert.
     pub fn upload(&self, remote_path: &str, local: &Path, mtime_ms: i64, base_rev: i64) -> ApiResult<RemoteEntry> {
+        self.upload_with_progress(remote_path, local, mtime_ms, base_rev, |_| {})
+    }
+
+    /// Wie `upload`, ruft `on_bytes` für jedes gelesene Stück auf.
+    pub fn upload_with_progress(
+        &self,
+        remote_path: &str,
+        local: &Path,
+        mtime_ms: i64,
+        base_rev: i64,
+        on_bytes: impl Fn(u64) + Send + 'static,
+    ) -> ApiResult<RemoteEntry> {
         let file = File::open(local)?;
         let len = file.metadata()?.len();
-        let body = reqwest::blocking::Body::sized(file, len);
+        let reader = CountingReader { inner: file, on_bytes };
+        let body = reqwest::blocking::Body::sized(reader, len);
         let resp = self
             .auth(self.http.put(self.url("/files/upload")))
             .query(&[("path", remote_path)])
@@ -169,15 +192,27 @@ impl Api {
 
     /// Lädt eine Datei nach `dest` herunter (überschreibt).
     pub fn download(&self, remote_path: &str, dest: &Path) -> ApiResult<()> {
+        self.download_with_progress(remote_path, dest, &mut |_| {})
+    }
+
+    pub fn download_with_progress(&self, remote_path: &str, dest: &Path, on_bytes: &mut dyn FnMut(u64)) -> ApiResult<()> {
         let mut resp = Self::check(
             self.auth(self.http.get(self.url("/files/download")))
                 .query(&[("path", remote_path)])
                 .send()?,
         )?;
-        let mut out = File::create(dest)?;
-        resp.copy_to(&mut out)?;
-        out.flush()?;
-        out.sync_all()?;
+        let mut out = std::io::BufWriter::with_capacity(1 << 20, File::create(dest)?);
+        let mut buf = vec![0u8; 256 * 1024];
+        loop {
+            let n = std::io::Read::read(&mut resp, &mut buf).map_err(|e| ApiError::Network(e.to_string()))?;
+            if n == 0 {
+                break;
+            }
+            out.write_all(&buf[..n])?;
+            on_bytes(n as u64);
+        }
+        let f = out.into_inner().map_err(|e| ApiError::Io(e.into_error()))?;
+        f.sync_all()?;
         Ok(())
     }
 
@@ -190,6 +225,42 @@ impl Api {
         .json()?)
     }
 
+    // ------------------------------------------------ Benutzerverwaltung (Admin)
+
+    pub fn list_users(&self) -> ApiResult<Vec<UserInfo>> {
+        Ok(Self::check(self.auth(self.http.get(self.url("/admin/users"))).send()?)?.json()?)
+    }
+
+    pub fn create_user(&self, username: &str, password: &str, quota_gb: f64, is_admin: bool) -> ApiResult<()> {
+        Self::check(
+            self.auth(self.http.post(self.url("/admin/users")))
+                .json(&serde_json::json!({ "username": username, "password": password, "quota_gb": quota_gb, "is_admin": is_admin }))
+                .send()?,
+        )?;
+        Ok(())
+    }
+
+    pub fn update_user(&self, id: i64, quota_gb: Option<f64>, password: Option<&str>) -> ApiResult<()> {
+        let mut body = serde_json::Map::new();
+        if let Some(q) = quota_gb {
+            body.insert("quota_gb".into(), q.into());
+        }
+        if let Some(p) = password {
+            body.insert("password".into(), p.into());
+        }
+        Self::check(
+            self.auth(self.http.patch(self.url(&format!("/admin/users/{id}"))))
+                .json(&body)
+                .send()?,
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_user(&self, id: i64) -> ApiResult<()> {
+        Self::check(self.auth(self.http.delete(self.url(&format!("/admin/users/{id}")))).send()?)?;
+        Ok(())
+    }
+
     pub fn delete(&self, remote_path: &str) -> ApiResult<()> {
         Self::check(
             self.auth(self.http.post(self.url("/files/delete")))
@@ -197,5 +268,18 @@ impl Api {
                 .send()?,
         )?;
         Ok(())
+    }
+}
+
+struct CountingReader<R, F> {
+    inner: R,
+    on_bytes: F,
+}
+
+impl<R: std::io::Read, F: Fn(u64)> std::io::Read for CountingReader<R, F> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        (self.on_bytes)(n as u64);
+        Ok(n)
     }
 }

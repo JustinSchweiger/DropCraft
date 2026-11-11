@@ -22,6 +22,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     api::{Api, ApiError, RemoteEntry},
+    progress::{self, ProgressRef},
     state::{State, Synced},
 };
 
@@ -100,11 +101,17 @@ pub struct SyncEngine {
     state: State,
     device: String,
     report: Report,
+    progress: ProgressRef,
 }
 
 impl SyncEngine {
     pub fn new(api: Api, root: PathBuf, state: State, device: String) -> Self {
-        Self { api, root, state, device, report: Report::default() }
+        Self { api, root, state, device, report: Report::default(), progress: ProgressRef::default() }
+    }
+
+    /// Live-Fortschritt (für die Oberfläche).
+    pub fn progress(&self) -> ProgressRef {
+        self.progress.clone()
     }
 
     pub fn api(&self) -> &Api {
@@ -119,6 +126,13 @@ impl SyncEngine {
     /// Fehler bei einzelnen Dateien werden als Ereignis gemeldet.
     pub fn sync_once(&mut self) -> Result<Report, SyncError> {
         self.report = Report::default();
+        {
+            let mut p = self.progress.lock().unwrap();
+            p.queue.clear();
+            p.current = None;
+            p.files_done = 0;
+            p.events.clear();
+        }
         if !self.root.is_dir() {
             return Err(SyncError::RootMissing(self.root.display().to_string()));
         }
@@ -132,6 +146,11 @@ impl SyncEngine {
                 break;
             }
         }
+        {
+            let mut p = self.progress.lock().unwrap();
+            p.queue.clear();
+            p.current = None;
+        }
         Ok(std::mem::take(&mut self.report))
     }
 
@@ -142,7 +161,14 @@ impl SyncEngine {
             let cursor = self.state.cursor();
             let changes = self.api.changes(cursor)?;
             for e in &changes.entries {
-                match self.apply_remote(e) {
+                if !e.deleted && !e.is_dir && self.state.get(&e.path).map(|s| s.rev) != Some(e.rev) {
+                    progress::enqueue(&self.progress, &e.path, false, e.size as u64);
+                }
+            }
+            for e in &changes.entries {
+                let res = self.apply_remote(e);
+                progress::drop_queued(&self.progress, &e.path, false);
+                match res {
                     Ok(()) => {}
                     Err(SyncError::Api(err @ (ApiError::Network(_) | ApiError::Unauthorized))) => {
                         return Err(err.into())
@@ -240,8 +266,10 @@ impl SyncEngine {
         let parent = local.parent().unwrap_or(&self.root).to_path_buf();
         fs::create_dir_all(&parent)?;
         let tmp = parent.join(format!(".dropcraft-{}.tmp", uuid::Uuid::new_v4()));
+        progress::start(&self.progress, &e.path, false, e.size as u64);
+        let prog = self.progress.clone();
         let res = (|| -> Result<(), SyncError> {
-            self.api.download(&e.path, &tmp)?;
+            self.api.download_with_progress(&e.path, &tmp, &mut |n| progress::advance(&prog, n))?;
             if let Some(expected) = &e.sha256 {
                 let got = hash_file(&tmp)?;
                 if &got != expected {
@@ -253,6 +281,7 @@ impl SyncEngine {
             fs::rename(&tmp, local)?;
             Ok(())
         })();
+        progress::finish(&self.progress, res.is_ok());
         if res.is_err() {
             let _ = fs::remove_file(&tmp);
         }
@@ -305,6 +334,18 @@ impl SyncEngine {
         let me = self.api.me()?;
         let mut free = me.quota_bytes - me.used_bytes;
         for (path, item) in &local {
+            if item.is_dir || now - item.mtime < SETTLE_MS {
+                continue;
+            }
+            let changed = match self.state.get(path) {
+                Some(s) => s.size != item.size || s.local_mtime != item.mtime,
+                None => true,
+            };
+            if changed {
+                progress::enqueue(&self.progress, path, true, item.size as u64);
+            }
+        }
+        for (path, item) in &local {
             let st = self.state.get(path);
             let res: Result<(), SyncError> = if item.is_dir {
                 if st.as_ref().map(|s| s.is_dir).unwrap_or(false) {
@@ -326,7 +367,7 @@ impl SyncEngine {
                     continue; // wird vermutlich gerade noch geschrieben
                 }
                 let needed = item.size - st.as_ref().map(|s| s.size).unwrap_or(0);
-                if needed > free {
+                let r = if needed > free {
                     Err(SyncError::Api(ApiError::QuotaExceeded))
                 } else {
                     let r = self.upload(path, item, st.as_ref());
@@ -334,7 +375,9 @@ impl SyncEngine {
                         free -= needed;
                     }
                     r
-                }
+                };
+                progress::drop_queued(&self.progress, path, true);
+                r
             };
             match res {
                 Ok(()) => {}
@@ -350,16 +393,28 @@ impl SyncEngine {
 
     fn upload(&mut self, path: &str, item: &LocalItem, st: Option<&Synced>) -> Result<(), SyncError> {
         let local = self.local_path(path);
-        let sha = hash_file(&local)?;
+        // Schon beim Prüfen als „aktuelle Datei“ anzeigen.
+        progress::start(&self.progress, path, true, item.size as u64);
+        let sha = match hash_file(&local) {
+            Ok(s) => s,
+            Err(e) => {
+                progress::finish(&self.progress, false);
+                return Err(e.into());
+            }
+        };
         if let Some(s) = st {
             if s.sha256.as_deref() == Some(sha.as_str()) {
                 // Nur die Änderungszeit hat sich geändert.
+                progress::finish(&self.progress, false);
                 self.state.put(&Synced { local_mtime: item.mtime, ..s.clone() })?;
                 return Ok(());
             }
         }
         let base_rev = st.map(|s| s.rev).unwrap_or(0);
-        match self.api.upload(path, &local, item.mtime, base_rev) {
+        let prog = self.progress.clone();
+        let result = self.api.upload_with_progress(path, &local, item.mtime, base_rev, move |n| progress::advance(&prog, n));
+        progress::finish(&self.progress, result.is_ok());
+        match result {
             Ok(r) => {
                 // Den Stand vom Scan merken. Hat sich die Datei während des
                 // Uploads geändert, erkennt der nächste Scan das und lädt neu.
@@ -455,7 +510,9 @@ impl SyncEngine {
             _ => {}
         }
         log::info!("{kind:?} {path} {detail}");
-        self.report.events.push(Event { kind, path: path.to_string(), detail, at: chrono::Local::now() });
+        let ev = Event { kind, path: path.to_string(), detail, at: chrono::Local::now() };
+        self.progress.lock().unwrap().events.push(ev.clone());
+        self.report.events.push(ev);
     }
 
     /// Vergisst den lokalen Stand (z. B. nach dem Abmelden).

@@ -1,9 +1,11 @@
 //! Taskleisten-Symbol, App-Icon und Fenster ein-/ausblenden.
 
-#[cfg_attr(not(windows), allow(unused_imports))]
-use std::sync::{
-    atomic::{AtomicIsize, Ordering},
-    Arc,
+use std::{
+    sync::{
+        atomic::{AtomicBool, AtomicIsize, Ordering},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant},
 };
 
 use tray_icon::{
@@ -48,7 +50,7 @@ pub fn logo_rgba(size: u32) -> Vec<u8> {
     px
 }
 
-fn line(px: &mut [u8], size: u32, a: (f32, f32), b: (f32, f32), thick: f32, col: [u8; 4]) {
+pub(crate) fn line(px: &mut [u8], size: u32, a: (f32, f32), b: (f32, f32), thick: f32, col: [u8; 4]) {
     let (vx, vy) = (b.0 - a.0, b.1 - a.1);
     let len2 = vx * vx + vy * vy;
     for y in 0..size {
@@ -79,47 +81,83 @@ pub struct TrayIds {
     pub quit: MenuId,
 }
 
-/// Fensterhandle (nur Windows), um das Fenster auch dann ein-/auszublenden,
-/// wenn egui gerade nicht zeichnet.
+/// Fenster-Steuerung. Unter Windows direkt über die Win32-API, weil egui
+/// bei verstecktem Fenster nicht zeichnet und Befehle sonst liegen blieben.
 #[derive(Clone, Default)]
 #[cfg_attr(not(windows), allow(dead_code))]
-pub struct WindowHandle(pub Arc<AtomicIsize>);
+pub struct WindowHandle {
+    hwnd: Arc<AtomicIsize>,
+    visible: Arc<AtomicBool>,
+    last_hide: Arc<Mutex<Option<Instant>>>,
+}
+
+/// Position/Größe des Tray-Symbols in physischen Pixeln.
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(windows), allow(dead_code))]
+pub struct Anchor {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
 
 impl WindowHandle {
     pub fn set_from<W: raw_window_handle::HasWindowHandle>(&self, w: &W) {
         #[cfg(windows)]
         if let Ok(h) = w.window_handle() {
             if let raw_window_handle::RawWindowHandle::Win32(h) = h.as_raw() {
-                self.0.store(h.hwnd.get(), Ordering::SeqCst);
+                self.hwnd.store(h.hwnd.get(), Ordering::SeqCst);
+                round_corners(h.hwnd.get());
             }
         }
         #[cfg(not(windows))]
         let _ = w;
     }
 
-    pub fn show(&self, ctx: &egui::Context) {
+    pub fn is_visible(&self) -> bool {
+        self.visible.load(Ordering::SeqCst)
+    }
+
+    /// Wurde das Popup gerade erst durch Wegklicken geschlossen? Dann soll
+    /// der Klick aufs Tray-Symbol es nicht sofort wieder öffnen.
+    fn hidden_just_now(&self) -> bool {
+        self.last_hide.lock().unwrap().map(|t| t.elapsed() < Duration::from_millis(400)).unwrap_or(false)
+    }
+
+    /// Klick aufs Tray-Symbol: Popup ein-/ausblenden.
+    pub fn toggle(&self, ctx: &egui::Context, anchor: Option<Anchor>) {
+        if self.is_visible() {
+            self.hide(ctx);
+        } else if !self.hidden_just_now() {
+            self.show(ctx, anchor);
+        }
+    }
+
+    /// Zeigt das Popup über dem Tray-Symbol (bzw. unten rechts).
+    pub fn show(&self, ctx: &egui::Context, anchor: Option<Anchor>) {
+        self.visible.store(true, Ordering::SeqCst);
         #[cfg(windows)]
         {
-            use windows_sys::Win32::UI::WindowsAndMessaging::{SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW};
-            let hwnd = self.0.load(Ordering::SeqCst);
+            let hwnd = self.hwnd.load(Ordering::SeqCst);
             if hwnd != 0 {
-                unsafe {
-                    ShowWindow(hwnd as _, SW_SHOW);
-                    ShowWindow(hwnd as _, SW_RESTORE);
-                    SetForegroundWindow(hwnd as _);
-                }
+                show_popup_win32(hwnd, anchor);
+                ctx.request_repaint();
+                return;
             }
         }
+        let _ = anchor;
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         ctx.request_repaint();
     }
 
     pub fn hide(&self, ctx: &egui::Context) {
+        self.visible.store(false, Ordering::SeqCst);
+        *self.last_hide.lock().unwrap() = Some(Instant::now());
         #[cfg(windows)]
         {
             use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
-            let hwnd = self.0.load(Ordering::SeqCst);
+            let hwnd = self.hwnd.load(Ordering::SeqCst);
             if hwnd != 0 {
                 unsafe {
                     ShowWindow(hwnd as _, SW_HIDE);
@@ -128,6 +166,61 @@ impl WindowHandle {
             }
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+    }
+}
+
+#[cfg(windows)]
+fn show_popup_win32(hwnd: isize, anchor: Option<Anchor>) {
+    use windows_sys::Win32::{
+        Foundation::RECT,
+        UI::WindowsAndMessaging::{
+            GetWindowRect, SetForegroundWindow, SetWindowPos, SystemParametersInfoW, HWND_TOPMOST, SPI_GETWORKAREA, SWP_NOSIZE,
+            SWP_SHOWWINDOW,
+        },
+    };
+    unsafe {
+        let mut wr = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        GetWindowRect(hwnd as _, &mut wr);
+        let (w, h) = (wr.right - wr.left, wr.bottom - wr.top);
+        let mut work = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut work as *mut RECT as *mut _, 0);
+        let margin = 12;
+        let (x, y) = popup_position((work.left, work.top, work.right, work.bottom), (w, h), anchor, margin);
+        SetWindowPos(hwnd as _, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_SHOWWINDOW);
+        SetForegroundWindow(hwnd as _);
+    }
+}
+
+/// Berechnet die Popup-Position: über (oder unter) dem Tray-Symbol,
+/// innerhalb des Arbeitsbereichs. Ohne Symbol: unten rechts.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn popup_position(work: (i32, i32, i32, i32), size: (i32, i32), anchor: Option<Anchor>, margin: i32) -> (i32, i32) {
+    let (left, top, right, bottom) = work;
+    let (w, h) = size;
+    let clamp_x = |x: i32| x.max(left + margin).min((right - w - margin).max(left));
+    match anchor {
+        Some(a) => {
+            let x = clamp_x(a.x + a.w / 2 - w / 2);
+            // Taskleiste oben: Symbol liegt über dem Arbeitsbereich.
+            let y = if a.y + a.h <= top + 4 { top + margin } else { bottom - h - margin };
+            (x, y)
+        }
+        None => (clamp_x(right - w - margin), bottom - h - margin),
+    }
+}
+
+#[cfg(windows)]
+fn round_corners(hwnd: isize) {
+    use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND};
+    let pref = DWMWCP_ROUND;
+    unsafe {
+        // Ab Windows 11; ältere Versionen ignorieren das.
+        DwmSetWindowAttribute(
+            hwnd as _,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            &pref as *const _ as *const _,
+            std::mem::size_of_val(&pref) as u32,
+        );
     }
 }
 
@@ -159,13 +252,14 @@ pub fn install_handlers(
 ) {
     let (w1, c1) = (win.clone(), ctx.clone());
     TrayIconEvent::set_event_handler(Some(move |e: TrayIconEvent| {
-        if let TrayIconEvent::Click { button: MouseButton::Left, button_state: tray_icon::MouseButtonState::Up, .. } = e {
-            w1.show(&c1);
+        if let TrayIconEvent::Click { button: MouseButton::Left, button_state: tray_icon::MouseButtonState::Up, rect, .. } = e {
+            let anchor = Anchor { x: rect.position.x as i32, y: rect.position.y as i32, w: rect.size.width as i32, h: rect.size.height as i32 };
+            w1.toggle(&c1, Some(anchor));
         }
     }));
     MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
         if e.id == ids.open {
-            win.show(&ctx);
+            win.show(&ctx, None);
         } else if e.id == ids.pause {
             on_pause();
             ctx.request_repaint();
@@ -173,4 +267,26 @@ pub fn install_handlers(
             on_quit();
         }
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn popup_above_tray_icon() {
+        // 1920x1080, Taskleiste unten (Arbeitsbereich endet bei 1032)
+        let work = (0, 0, 1920, 1032);
+        let a = Anchor { x: 1700, y: 1040, w: 32, h: 32 };
+        assert_eq!(popup_position(work, (380, 580), Some(a), 12), (1526, 440));
+        // Symbol ganz rechts: Popup bleibt im Bildschirm
+        let a = Anchor { x: 1900, y: 1040, w: 20, h: 32 };
+        assert_eq!(popup_position(work, (380, 580), Some(a), 12).0, 1920 - 380 - 12);
+        // Taskleiste oben
+        let work = (0, 40, 1920, 1080);
+        let a = Anchor { x: 1700, y: 4, w: 32, h: 32 };
+        assert_eq!(popup_position(work, (380, 580), Some(a), 12).1, 52);
+        // Ohne Symbol: unten rechts
+        assert_eq!(popup_position((0, 0, 1920, 1032), (380, 580), None, 12), (1528, 440));
+    }
 }

@@ -23,5 +23,5 @@ raw-window-handle = "0.6"
 log = "0.4"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Storage_FileSystem", "Win32_UI_Shell", "Win32_Graphics_Dwm"] }
 winreg = "0.55"

@@ -11,10 +11,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use dropcraft_core::{Api, ApiError, Event, State, SyncEngine, SyncError};
+use dropcraft_core::{Api, ApiError, Event, ProgressRef, State, SyncEngine, SyncError};
 use notify::{RecursiveMode, Watcher};
 
-use crate::config::{self, Config};
+use crate::{config::Account, folder_icon};
 
 pub enum Cmd {
     SyncNow,
@@ -40,11 +40,13 @@ pub struct Shared {
     pub used: i64,
     pub quota: i64,
     pub last_sync: Option<chrono::DateTime<chrono::Local>>,
+    pub progress: Option<ProgressRef>,
+    pub is_admin: bool,
 }
 
 impl Default for Shared {
     fn default() -> Self {
-        Self { phase: Phase::Starting, activity: VecDeque::new(), used: 0, quota: 0, last_sync: None }
+        Self { phase: Phase::Starting, activity: VecDeque::new(), used: 0, quota: 0, last_sync: None, progress: None, is_admin: false }
     }
 }
 
@@ -55,7 +57,7 @@ const RETRY: Duration = Duration::from_secs(60);
 const DEBOUNCE: Duration = Duration::from_millis(2500);
 const MAX_ACTIVITY: usize = 100;
 
-pub fn spawn(cfg: Config, shared: SharedRef, repaint: egui::Context) -> Sender<Cmd> {
+pub fn spawn(cfg: Account, shared: SharedRef, repaint: egui::Context) -> Sender<Cmd> {
     let (tx, rx) = mpsc::channel::<Cmd>();
     let tx_watch = tx.clone();
     thread::Builder::new()
@@ -71,7 +73,8 @@ pub fn spawn(cfg: Config, shared: SharedRef, repaint: egui::Context) -> Sender<C
                 Ok(a) => a,
                 Err(e) => return set(Phase::Error(e.to_string())),
             };
-            let state = match State::open(&config::state_db_path()) {
+            let _ = std::fs::create_dir_all(cfg.state_dir());
+            let state = match State::open(&cfg.state_db()) {
                 Ok(s) => s,
                 Err(e) => return set(Phase::Error(format!("Datenbank: {e}"))),
             };
@@ -83,7 +86,9 @@ pub fn spawn(cfg: Config, shared: SharedRef, repaint: egui::Context) -> Sender<C
                 let _ = state.set_meta("binding", &binding);
             }
             let _ = std::fs::create_dir_all(&cfg.sync_dir);
+            folder_icon::apply(&cfg.sync_dir);
             let mut engine = SyncEngine::new(api.clone(), cfg.sync_dir.clone(), state, cfg.device_name.clone());
+            shared.lock().unwrap().progress = Some(engine.progress());
 
             // Dateiänderungen beobachten.
             let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
@@ -120,10 +125,22 @@ pub fn spawn(cfg: Config, shared: SharedRef, repaint: egui::Context) -> Sender<C
                 let result = engine.sync_once();
                 let wait = {
                     let mut sh = shared.lock().unwrap();
+                    if result.is_err() {
+                        // Ereignisse eines abgebrochenen Durchgangs nicht verlieren.
+                        if let Some(p) = sh.progress.clone() {
+                            let evs = std::mem::take(&mut p.lock().unwrap().events);
+                            for ev in evs {
+                                sh.activity.push_front(ev);
+                            }
+                        }
+                    }
                     let wait = match result {
                         Ok(report) => {
                             for ev in report.events {
                                 sh.activity.push_front(ev);
+                            }
+                            if let Some(p) = &sh.progress {
+                                p.lock().unwrap().events.clear();
                             }
                             sh.activity.truncate(MAX_ACTIVITY);
                             sh.last_sync = Some(chrono::Local::now());
@@ -157,6 +174,7 @@ pub fn spawn(cfg: Config, shared: SharedRef, repaint: egui::Context) -> Sender<C
                     let mut sh = shared.lock().unwrap();
                     sh.used = me.used_bytes;
                     sh.quota = me.quota_bytes;
+                    sh.is_admin = me.is_admin;
                 }
                 repaint.request_repaint();
 
@@ -188,11 +206,4 @@ pub fn spawn(cfg: Config, shared: SharedRef, repaint: egui::Context) -> Sender<C
         })
         .expect("Sync-Thread konnte nicht starten");
     tx
-}
-
-/// Vergisst den lokalen Sync-Stand (nach dem Abmelden).
-pub fn reset_state() {
-    if let Ok(s) = State::open(&config::state_db_path()) {
-        let _ = s.clear();
-    }
 }

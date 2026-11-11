@@ -1,6 +1,6 @@
 # DropCraft
 
-Eigener Dropbox-Klon: ein Rust-Server mit getrenntem Speicher pro Account, dazu Apps für Windows (fertig) und Android/iOS (geplant).
+Eigener Dropbox-Klon: ein Rust-Server mit getrenntem Speicher pro Account, dazu eine Windows-App (mehrere Konten, Taskleisten-Popup) und später Android/iOS.
 
 ## Aufbau
 
@@ -22,13 +22,27 @@ cargo build --release -p dropcraft-desktop
 ```
 
 Die fertige Datei `client\target\release\DropCraft.exe` kannst du an einen beliebigen Ort kopieren.
-Beim ersten Start fragt sie nach Server, Benutzername, Passwort und Sync-Ordner.
 
-- **Fenster schließen** = in die Taskleiste minimieren. Beenden über das Taskleisten-Symbol (Rechtsklick).
-- Einstellungen und Sync-Stand liegen in `%APPDATA%\DropCraft\`.
+### Bedienung
+
+- **Popup über der Taskleiste:** Klick aufs DropCraft-Symbol öffnet das Fenster, Wegklicken oder Esc schließt es.
+  Rechtsklick aufs Symbol: Öffnen, Pausieren, Beenden.
+- **Live-Statistik:** aktuelle Datei mit Fortschritt, Geschwindigkeit, verbleibende Dateien/Größe, Restzeit, Warteschlange.
+- **Mehrere Konten:** Konto › „Konto hinzufügen …“. Jedes Konto hat eigenen Server, eigene Anmeldung und eigenen
+  Sync-Ordner (z. B. `DropCraft` und `DropCraft ocv`). Ordner dürfen sich nicht überschneiden. Oben im Popup
+  zwischen den Konten wechseln.
+- **Benutzer verwalten** (nur für Admin-Konten): Konto › „Benutzer verwalten …“ – Name, Passwort und Speicher in GB
+  eingeben, fertig. Speicher ändern, Passwort zurücksetzen, Benutzer löschen. Neue Benutzer sind nie Admins.
+- **Ordnersymbol:** Sync-Ordner bekommen im Explorer ein eigenes Symbol (über `desktop.ini`).
+- Einstellungen und Sync-Stand liegen in `%APPDATA%\DropCraft\` (pro Konto unter `accounts\<id>\`).
 - Ignoriert werden u. a. `~$…`-Sperrdateien von Office, `*.tmp`, `desktop.ini`, `Thumbs.db`.
 - Wird eine Datei auf zwei Geräten gleichzeitig geändert, bleibt die lokale Version als
   „Name (Konflikt Gerät Datum).ext“ erhalten.
+
+### Weiterer Server (z. B. nur für „ocv“)
+
+Wie oben „Auf dem VPS installieren“, dann nur diesen einen Account anlegen. Ohne `--admin` ist er ein normaler
+Nutzer; Speicher änderst du dann per `docker compose exec dropcraft dropcraft-server …` bzw. legst den Account neu an.
 
 Tests des Sync-Kerns (startet einen echten Server, braucht vorher `cargo build --release` in `server/`):
 

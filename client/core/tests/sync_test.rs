@@ -110,6 +110,18 @@ fn two_devices_stay_in_sync() {
     assert_eq!(r.uploaded, 2, "{r:?}");
     let r = b.engine.sync_once().unwrap();
     assert_eq!(r.downloaded, 2, "{r:?}");
+    // Fortschritt: Bytes gezählt, Warteschlange danach leer.
+    {
+        let pa = a.engine.progress();
+        let pa = pa.lock().unwrap();
+        assert_eq!(pa.bytes_up, 300_005, "hochgeladene Bytes");
+        assert_eq!(pa.files_done, 2);
+        assert!(!pa.is_active());
+        let pb = b.engine.progress();
+        let pb = pb.lock().unwrap();
+        assert_eq!(pb.bytes_down, 300_005, "heruntergeladene Bytes");
+        assert!(pb.queue.is_empty() && pb.current.is_none());
+    }
     assert_eq!(read(&rb, "Dokumente/Brief.txt").unwrap(), b"Hallo");
     assert_eq!(read(&rb, "Fotos/2026/bild.jpg").unwrap().len(), 300_000);
     assert!(rb.join("Leer").is_dir(), "leerer Ordner fehlt");
