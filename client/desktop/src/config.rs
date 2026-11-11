@@ -173,6 +173,37 @@ pub fn set_autostart(enabled: bool) {
 #[cfg(not(windows))]
 pub fn set_autostart(_enabled: bool) {}
 
+/// Explorer-Rechtsklick „DropCraft-Link kopieren“ für Dateien und Ordner in
+/// den Sync-Ordnern. Unter Windows 11 im Menü „Weitere Optionen anzeigen“.
+#[cfg(windows)]
+pub fn register_context_menu(accounts: &[Account]) {
+    use winreg::{enums::HKEY_CURRENT_USER, RegKey};
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let Ok(exe) = std::env::current_exe() else { return };
+    for base in ["Software\\Classes\\Directory\\shell\\DropCraftShare", "Software\\Classes\\*\\shell\\DropCraftShare"] {
+        if accounts.is_empty() {
+            let _ = hkcu.delete_subkey_all(base);
+            continue;
+        }
+        let Ok((key, _)) = hkcu.create_subkey(base) else { continue };
+        let _ = key.set_value("MUIVerb", &"DropCraft-Link kopieren");
+        let _ = key.set_value("Icon", &format!("\"{}\",0", exe.display()));
+        // Nur in den Sync-Ordnern anzeigen.
+        let cond = accounts
+            .iter()
+            .map(|a| format!("System.ItemPathDisplay:~<\"{}\"", a.sync_dir.display()))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let _ = key.set_value("AppliesTo", &cond);
+        if let Ok((cmd, _)) = key.create_subkey("command") {
+            let _ = cmd.set_value("", &format!("\"{}\" --share \"%1\"", exe.display()));
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn register_context_menu(_accounts: &[Account]) {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

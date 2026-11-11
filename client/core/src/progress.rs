@@ -54,20 +54,20 @@ impl Progress {
 
 pub type ProgressRef = Arc<Mutex<Progress>>;
 
-pub(crate) fn enqueue(p: &ProgressRef, path: &str, upload: bool, size: u64) {
+pub fn enqueue(p: &ProgressRef, path: &str, upload: bool, size: u64) {
     let mut g = p.lock().unwrap();
     if !g.queue.iter().any(|q| q.path == path && q.upload == upload) {
         g.queue.push(QueueItem { path: path.to_string(), upload, size });
     }
 }
 
-pub(crate) fn start(p: &ProgressRef, path: &str, upload: bool, total: u64) {
+pub fn start(p: &ProgressRef, path: &str, upload: bool, total: u64) {
     let mut g = p.lock().unwrap();
     g.queue.retain(|q| !(q.path == path && q.upload == upload));
     g.current = Some(Transfer { path: path.to_string(), upload, done: 0, total });
 }
 
-pub(crate) fn advance(p: &ProgressRef, n: u64) {
+pub fn advance(p: &ProgressRef, n: u64) {
     let mut g = p.lock().unwrap();
     let upload = match g.current.as_mut() {
         Some(c) => {
@@ -83,7 +83,7 @@ pub(crate) fn advance(p: &ProgressRef, n: u64) {
     }
 }
 
-pub(crate) fn finish(p: &ProgressRef, ok: bool) {
+pub fn finish(p: &ProgressRef, ok: bool) {
     let mut g = p.lock().unwrap();
     g.current = None;
     if ok {
@@ -91,6 +91,6 @@ pub(crate) fn finish(p: &ProgressRef, ok: bool) {
     }
 }
 
-pub(crate) fn drop_queued(p: &ProgressRef, path: &str, upload: bool) {
+pub fn drop_queued(p: &ProgressRef, path: &str, upload: bool) {
     p.lock().unwrap().queue.retain(|q| !(q.path == path && q.upload == upload));
 }

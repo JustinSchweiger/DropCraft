@@ -69,6 +69,13 @@ pub struct UserInfo {
     pub created_at: i64,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Share {
+    pub token: String,
+    pub path: String,
+    pub created_at: i64,
+}
+
 #[derive(Clone)]
 pub struct Api {
     base: String,
@@ -86,6 +93,15 @@ impl Api {
             .user_agent(concat!("DropCraft/", env!("CARGO_PKG_VERSION")))
             .build()?;
         Ok(Self { base, token, http })
+    }
+
+    /// Server-Adresse ohne /api, z. B. für Freigabe-Links.
+    pub fn server(&self) -> &str {
+        self.base.trim_end_matches("/api")
+    }
+
+    pub fn share_url(&self, token: &str) -> String {
+        format!("{}/s/{token}", self.server())
     }
 
     pub fn token(&self) -> Option<&str> {
@@ -223,6 +239,63 @@ impl Api {
                 .send()?,
         )?
         .json()?)
+    }
+
+    // ------------------------------------------------ Freigaben
+
+    pub fn create_share(&self, remote_path: &str) -> ApiResult<Share> {
+        Ok(Self::check(
+            self.auth(self.http.post(self.url("/shares")))
+                .json(&serde_json::json!({ "path": remote_path }))
+                .send()?,
+        )?
+        .json()?)
+    }
+
+    pub fn list_shares(&self) -> ApiResult<Vec<Share>> {
+        Ok(Self::check(self.auth(self.http.get(self.url("/shares"))).send()?)?.json()?)
+    }
+
+    pub fn delete_share(&self, token: &str) -> ApiResult<()> {
+        Self::check(self.auth(self.http.delete(self.url(&format!("/shares/{token}")))).send()?)?;
+        Ok(())
+    }
+
+    /// Teilbereich einer Datei laden (für den Abruf von Platzhaltern).
+    pub fn download_range(&self, remote_path: &str, offset: u64, len: u64, on_chunk: &mut dyn FnMut(u64, &[u8]) -> std::io::Result<()>) -> ApiResult<()> {
+        let end = offset + len.saturating_sub(1);
+        let mut resp = Self::check(
+            self.auth(self.http.get(self.url("/files/download")))
+                .query(&[("path", remote_path)])
+                .header(reqwest::header::RANGE, format!("bytes={offset}-{end}"))
+                .send()?,
+        )?;
+        let partial = resp.status() == StatusCode::PARTIAL_CONTENT;
+        let mut pos: u64 = 0; // Position im Antwortkörper
+        let mut buf = vec![0u8; 256 * 1024];
+        loop {
+            let n = std::io::Read::read(&mut resp, &mut buf).map_err(|e| ApiError::Network(e.to_string()))?;
+            if n == 0 {
+                break;
+            }
+            // Ohne Range-Unterstützung kommt die ganze Datei: zuschneiden.
+            let (abs_start, chunk) = if partial {
+                (offset + pos, &buf[..n])
+            } else {
+                let s = pos;
+                let e = pos + n as u64;
+                if e <= offset || s > end {
+                    pos += n as u64;
+                    continue;
+                }
+                let from = offset.saturating_sub(s) as usize;
+                let to = ((end + 1).min(e) - s) as usize;
+                (s + from as u64, &buf[from..to])
+            };
+            pos += n as u64;
+            on_chunk(abs_start, chunk)?;
+        }
+        Ok(())
     }
 
     // ------------------------------------------------ Benutzerverwaltung (Admin)

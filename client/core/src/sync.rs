@@ -22,6 +22,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     api::{Api, ApiError, RemoteEntry},
+    hooks::{FullDownload, LocalHooks},
     progress::{self, ProgressRef},
     state::{State, Synced},
 };
@@ -102,11 +103,25 @@ pub struct SyncEngine {
     device: String,
     report: Report,
     progress: ProgressRef,
+    hooks: Box<dyn LocalHooks>,
 }
 
 impl SyncEngine {
     pub fn new(api: Api, root: PathBuf, state: State, device: String) -> Self {
-        Self { api, root, state, device, report: Report::default(), progress: ProgressRef::default() }
+        Self {
+            api,
+            root,
+            state,
+            device,
+            report: Report::default(),
+            progress: ProgressRef::default(),
+            hooks: Box::new(FullDownload),
+        }
+    }
+
+    /// Platzhalter-Unterstützung einschalten (siehe [`LocalHooks`]).
+    pub fn set_hooks(&mut self, hooks: Box<dyn LocalHooks>) {
+        self.hooks = hooks;
     }
 
     /// Live-Fortschritt (für die Oberfläche).
@@ -142,6 +157,7 @@ impl SyncEngine {
             let before = self.report.conflicts;
             self.pull()?;
             self.push()?;
+            self.availability()?;
             if self.report.conflicts == before {
                 break;
             }
@@ -216,6 +232,7 @@ impl SyncEngine {
                 self.move_to_conflict(&e.path)?;
             }
             fs::create_dir_all(&local)?;
+            self.hooks.mark_synced(&local, true);
             self.state.put(&Synced {
                 path: e.path.clone(),
                 is_dir: true,
@@ -240,22 +257,48 @@ impl SyncEngine {
                 )));
             }
             Ok(m) => {
-                let unchanged = st.as_ref().map(|s| local_unchanged(s, &m)).unwrap_or(false);
-                if !unchanged {
-                    let sha = hash_file(&local)?;
-                    if Some(&sha) == e.sha256.as_ref() {
-                        // Gleicher Inhalt auf beiden Seiten: nur merken.
+                // Platzhalter ohne Inhalt kann lokal niemand geändert haben.
+                if self.hooks.is_online_only(&local) {
+                    if !self.hooks.wants_local(&local) && self.hooks.update_placeholder(&local, e)? {
                         self.remember_file(e, &local)?;
                         return Ok(());
                     }
-                    let local_is_last_synced = st.as_ref().and_then(|s| s.sha256.as_ref()) == Some(&sha);
-                    if !local_is_last_synced {
-                        // Beide Seiten geändert -> lokale Version sichern.
-                        self.move_to_conflict(&e.path)?;
+                } else {
+                    let unchanged = st.as_ref().map(|s| local_unchanged(s, &m)).unwrap_or(false);
+                    if unchanged && !self.hooks.wants_local(&local) && self.hooks.update_placeholder(&local, e)? {
+                        // Unveränderte Datei, die nicht angepinnt ist: nicht neu
+                        // laden, sondern zum Platzhalter der neuen Version machen.
+                        self.remember_file(e, &local)?;
+                        return Ok(());
+                    }
+                    if !unchanged {
+                        let sha = hash_file(&local)?;
+                        if Some(&sha) == e.sha256.as_ref() {
+                            // Gleicher Inhalt auf beiden Seiten: nur merken.
+                            self.remember_file(e, &local)?;
+                            self.hooks.mark_synced(&local, false);
+                            return Ok(());
+                        }
+                        let local_is_last_synced = st.as_ref().and_then(|s| s.sha256.as_ref()) == Some(&sha);
+                        if !local_is_last_synced {
+                            // Beide Seiten geändert -> lokale Version sichern.
+                            self.move_to_conflict(&e.path)?;
+                        }
                     }
                 }
             }
-            Err(_) => {}
+            Err(_) => {
+                // Neu vom Server: als Platzhalter anlegen, wenn gewünscht.
+                if !self.hooks.wants_local(&local) {
+                    if let Some(parent) = local.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    if self.hooks.create_placeholder(&local, e)? {
+                        self.remember_file(e, &local)?;
+                        return Ok(());
+                    }
+                }
+            }
         }
         self.download(e, &local)?;
         self.event(EventKind::Downloaded, &e.path, human_size(e.size));
@@ -286,6 +329,7 @@ impl SyncEngine {
             let _ = fs::remove_file(&tmp);
         }
         res?;
+        self.hooks.mark_synced(local, false);
         self.remember_file(e, local)
     }
 
@@ -334,7 +378,7 @@ impl SyncEngine {
         let me = self.api.me()?;
         let mut free = me.quota_bytes - me.used_bytes;
         for (path, item) in &local {
-            if item.is_dir || now - item.mtime < SETTLE_MS {
+            if item.is_dir || now - item.mtime < SETTLE_MS || self.hooks.is_online_only(&self.local_path(path)) {
                 continue;
             }
             let changed = match self.state.get(path) {
@@ -352,12 +396,16 @@ impl SyncEngine {
                     Ok(())
                 } else {
                     self.api.mkdir(path).map_err(Into::into).and_then(|r| {
+                        self.hooks.mark_synced(&self.local_path(path), true);
                         self.state
                             .put(&Synced { path: path.clone(), is_dir: true, rev: r.rev, sha256: None, size: 0, local_mtime: 0 })
                             .map_err(Into::into)
                     })
                 }
             } else {
+                if self.hooks.is_online_only(&self.local_path(path)) {
+                    continue; // Platzhalter ohne Inhalt: nichts hochzuladen
+                }
                 if let Some(s) = &st {
                     if s.size == item.size && s.local_mtime == item.mtime {
                         continue; // unverändert
@@ -427,6 +475,7 @@ impl SyncEngine {
                     local_mtime: item.mtime,
                 })?;
                 self.report.uploaded += 1;
+                self.hooks.mark_synced(&local, false);
                 self.event(EventKind::Uploaded, path, human_size(r.size));
                 Ok(())
             }
@@ -438,6 +487,52 @@ impl SyncEngine {
             }
             Err(e) => Err(e.into()),
         }
+    }
+
+    // ------------------------------------------------------------ Verfügbarkeit
+
+    /// Angepinnte Platzhalter herunterladen, freigegebene Dateien leeren.
+    fn availability(&mut self) -> Result<(), SyncError> {
+        for s in self.state.all()? {
+            if s.is_dir {
+                continue;
+            }
+            let local = self.local_path(&s.path);
+            if !local.is_file() {
+                continue;
+            }
+            let online_only = self.hooks.is_online_only(&local);
+            if online_only && self.hooks.wants_local(&local) {
+                let e = RemoteEntry {
+                    path: s.path.clone(),
+                    is_dir: false,
+                    size: s.size,
+                    sha256: s.sha256.clone(),
+                    modified_at: 0,
+                    rev: s.rev,
+                    deleted: false,
+                };
+                progress::enqueue(&self.progress, &s.path, false, s.size as u64);
+                let modified = fs::metadata(&local).ok().map(|m| mtime_ms(&m)).unwrap_or(0);
+                let res = self.download(&RemoteEntry { modified_at: modified, ..e }, &local);
+                progress::drop_queued(&self.progress, &s.path, false);
+                match res {
+                    Ok(()) => self.event(EventKind::Downloaded, &s.path, human_size(s.size)),
+                    Err(SyncError::Api(err @ (ApiError::Network(_) | ApiError::Unauthorized))) => return Err(err.into()),
+                    Err(err) => self.event(EventKind::Error, &s.path, err.to_string()),
+                }
+            } else if !online_only && self.hooks.wants_free(&local) {
+                let unchanged = fs::metadata(&local).map(|m| local_unchanged(&s, &m)).unwrap_or(false);
+                if unchanged {
+                    if let Err(err) = self.hooks.free_space(&local) {
+                        self.event(EventKind::Error, &s.path, format!("Speicher freigeben: {err}"));
+                    } else if let Ok(m) = fs::metadata(&local) {
+                        self.state.put(&Synced { local_mtime: mtime_ms(&m), ..s.clone() })?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     // ------------------------------------------------------------ helpers

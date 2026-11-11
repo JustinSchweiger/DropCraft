@@ -21,6 +21,8 @@ pub enum Cmd {
     SetPaused(bool),
     FsChanged,
     Stop,
+    /// Konto wird entfernt: Sync-Ordner bei Windows abmelden, dann beenden.
+    Remove,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +62,8 @@ const MAX_ACTIVITY: usize = 100;
 pub fn spawn(cfg: Account, shared: SharedRef, repaint: egui::Context) -> Sender<Cmd> {
     let (tx, rx) = mpsc::channel::<Cmd>();
     let tx_watch = tx.clone();
+    #[cfg_attr(not(all(windows, feature = "cloud-files")), allow(unused_variables))]
+    let tx_self = tx.clone();
     thread::Builder::new()
         .name("sync".into())
         .spawn(move || {
@@ -90,6 +94,24 @@ pub fn spawn(cfg: Account, shared: SharedRef, repaint: egui::Context) -> Sender<
             let mut engine = SyncEngine::new(api.clone(), cfg.sync_dir.clone(), state, cfg.device_name.clone());
             shared.lock().unwrap().progress = Some(engine.progress());
 
+            // Platzhalter statt vollständiger Downloads (Windows, optional).
+            #[cfg(all(windows, feature = "cloud-files"))]
+            let _cloud = match crate::cloudfiles::connect(&cfg.id, &cfg.username, &cfg.sync_dir, api.clone(), engine.progress(), tx_self.clone()) {
+                Ok((hooks, root)) => {
+                    engine.set_hooks(Box::new(hooks));
+                    Some(root)
+                }
+                Err(e) => {
+                    shared.lock().unwrap().activity.push_front(Event {
+                        kind: dropcraft_core::EventKind::Error,
+                        path: "Cloud-Dateien".into(),
+                        detail: e,
+                        at: chrono::Local::now(),
+                    });
+                    None
+                }
+            };
+
             // Dateiänderungen beobachten.
             let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
                 if let Ok(ev) = res {
@@ -115,6 +137,10 @@ pub fn spawn(cfg: Account, shared: SharedRef, repaint: egui::Context) -> Sender<
                     set(Phase::Paused);
                     match rx.recv() {
                         Ok(Cmd::SetPaused(p)) => paused = p,
+                        Ok(Cmd::Remove) => {
+                            remove_cloud(&cfg);
+                            break;
+                        }
                         Ok(Cmd::Stop) | Err(_) => break,
                         Ok(_) => {}
                     }
@@ -154,6 +180,10 @@ pub fn spawn(cfg: Account, shared: SharedRef, repaint: egui::Context) -> Sender<
                             // Auf Abmelden/Neuanmeldung durch die Oberfläche warten.
                             loop {
                                 match rx.recv() {
+                                    Ok(Cmd::Remove) => {
+                                        remove_cloud(&cfg);
+                                        return;
+                                    }
                                     Ok(Cmd::Stop) | Err(_) => return,
                                     _ => {}
                                 }
@@ -187,6 +217,10 @@ pub fn spawn(cfg: Account, shared: SharedRef, repaint: egui::Context) -> Sender<
                             match rx.recv_timeout(DEBOUNCE) {
                                 Ok(Cmd::FsChanged) => continue,
                                 Ok(Cmd::Stop) => return,
+                                Ok(Cmd::Remove) => {
+                                    remove_cloud(&cfg);
+                                    return;
+                                }
                                 Ok(Cmd::SetPaused(p)) => {
                                     paused = p;
                                     break;
@@ -199,6 +233,10 @@ pub fn spawn(cfg: Account, shared: SharedRef, repaint: egui::Context) -> Sender<
                     }
                     Ok(Cmd::SyncNow) | Err(RecvTimeoutError::Timeout) => {}
                     Ok(Cmd::SetPaused(p)) => paused = p,
+                    Ok(Cmd::Remove) => {
+                        remove_cloud(&cfg);
+                        break;
+                    }
                     Ok(Cmd::Stop) | Err(RecvTimeoutError::Disconnected) => break,
                 }
             }
@@ -206,4 +244,11 @@ pub fn spawn(cfg: Account, shared: SharedRef, repaint: egui::Context) -> Sender<
         })
         .expect("Sync-Thread konnte nicht starten");
     tx
+}
+
+/// Beim Entfernen eines Kontos: alle Platzhalter herunterladen und den
+/// Sync-Ordner bei Windows abmelden, damit keine Dateien verschwinden.
+fn remove_cloud(_cfg: &Account) {
+    #[cfg(all(windows, feature = "cloud-files"))]
+    crate::cloudfiles::unregister(&_cfg.id, &_cfg.sync_dir);
 }

@@ -13,13 +13,23 @@ client/desktop/  Windows-App (egui): Sync-Ordner, Taskleisten-Symbol, Autostart
 
 ## Windows-App bauen und starten
 
-Voraussetzung: Rust (https://rustup.rs) mit den Visual-Studio-Buildtools.
+Voraussetzung: Rust (https://rustup.rs, mindestens 1.93 – `rustup update`) mit den Visual-Studio-Buildtools.
 
 ```powershell
 cd client
-cargo build --release -p dropcraft-desktop
+cargo build --release -p dropcraft-desktop                         # Standard: alles wird heruntergeladen
+cargo build --release -p dropcraft-desktop --features cloud-files  # mit Platzhaltern + Status-Spalte (Test)
 .\target\release\DropCraft.exe
 ```
+
+### Dateien bei Bedarf (`--features cloud-files`, noch experimentell)
+
+- Der Sync-Ordner wird bei Windows als Cloud-Ordner angemeldet und erscheint links im Explorer.
+- Neue Dateien vom Server erscheinen als **Platzhalter** (Wolke) und werden erst beim Öffnen geladen.
+- **Status-Spalte** im Explorer: Wolke = nur online, Haken = auf diesem Gerät, voller Haken = immer verfügbar.
+- Rechtsklick › **„Immer auf diesem Gerät behalten“** lädt einen Ordner komplett und hält ihn aktuell,
+  **„Speicherplatz freigeben“** macht ihn wieder zu Platzhaltern.
+- Beim Entfernen eines Kontos werden vorher alle Platzhalter heruntergeladen.
 
 Die fertige Datei `client\target\release\DropCraft.exe` kannst du an einen beliebigen Ort kopieren.
 
@@ -34,6 +44,10 @@ Die fertige Datei `client\target\release\DropCraft.exe` kannst du an einen belie
 - **Benutzer verwalten** (nur für Admin-Konten): Konto › „Benutzer verwalten …“ – Name, Passwort und Speicher in GB
   eingeben, fertig. Speicher ändern, Passwort zurücksetzen, Benutzer löschen. Neue Benutzer sind nie Admins.
 - **Ordnersymbol:** Sync-Ordner bekommen im Explorer ein eigenes Symbol (über `desktop.ini`).
+- **Taskleisten-Symbol:** dreht sich beim Synchronisieren; grau = pausiert, gelb = Problem. Tooltip mit Restmenge.
+- **Freigaben:** Rechtsklick auf Ordner/Datei im Sync-Ordner › „DropCraft-Link kopieren“ (Windows 11: unter
+  „Weitere Optionen anzeigen“) oder Popup › Konto › „Freigaben …“. Der Link öffnet eine Webseite mit dem Inhalt,
+  Einzel-Downloads und „Alles als ZIP“ – ohne DropCraft. Links lassen sich dort auch wieder beenden.
 - Einstellungen und Sync-Stand liegen in `%APPDATA%\DropCraft\` (pro Konto unter `accounts\<id>\`).
 - Ignoriert werden u. a. `~$…`-Sperrdateien von Office, `*.tmp`, `desktop.ini`, `Thumbs.db`.
 - Wird eine Datei auf zwei Geräten gleichzeitig geändert, bleibt die lokale Version als
@@ -97,6 +111,8 @@ Alle Endpunkte unter `/api`. Authentifizierung mit `Authorization: Bearer <token
 | POST | `/files/delete` | `{path}`, Ordner rekursiv |
 | POST | `/files/move` | `{from, to}`, auch Umbenennen |
 | GET | `/sync/changes?cursor=<n>&limit=1000` | Alle Änderungen seit `cursor`. `cursor=0` liefert den kompletten Stand |
+| GET/POST | `/shares` | Freigaben auflisten / anlegen `{path}` → `{token}`; öffentlich unter `/s/{token}` |
+| DELETE | `/shares/{token}` | Freigabe beenden |
 | GET/POST | `/admin/users` | Accounts auflisten / anlegen `{username, password, quota_gb}` |
 | PATCH/DELETE | `/admin/users/{id}` | Quota/Passwort ändern / Account löschen |
 

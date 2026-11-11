@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use dropcraft_core::{sync::human_size, Api, ApiError, EventKind, Progress, UserInfo};
+use dropcraft_core::{sync::human_size, Api, ApiError, EventKind, Progress, Share, UserInfo};
 use egui::{Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 
 use crate::{
@@ -50,34 +50,93 @@ impl AccountRt {
     }
 }
 
-/// Für das Taskleisten-Menü: alle Konten pausieren/fortsetzen.
+/// Für das Taskleisten-Symbol: Zustand aller Konten, alle pausieren/fortsetzen.
 #[derive(Clone, Default)]
-struct Controls(Arc<Mutex<Vec<(Sender<Cmd>, Arc<AtomicBool>, String)>>>);
+struct Controls(Arc<Mutex<Vec<Ctl>>>);
+
+struct Ctl {
+    tx: Sender<Cmd>,
+    paused: Arc<AtomicBool>,
+    id: String,
+    shared: SharedRef,
+}
 
 impl Controls {
     fn rebuild(&self, rts: &[AccountRt]) {
-        *self.0.lock().unwrap() =
-            rts.iter().filter_map(|r| r.cmd.clone().map(|tx| (tx, r.paused.clone(), r.acc.id.clone()))).collect();
+        *self.0.lock().unwrap() = rts
+            .iter()
+            .filter_map(|r| {
+                r.cmd.clone().map(|tx| Ctl { tx, paused: r.paused.clone(), id: r.acc.id.clone(), shared: r.shared.clone() })
+            })
+            .collect();
     }
 
     fn any_running(&self) -> bool {
-        self.0.lock().unwrap().iter().any(|(_, p, _)| !p.load(Ordering::SeqCst))
+        self.0.lock().unwrap().iter().any(|c| !c.paused.load(Ordering::SeqCst))
     }
 
     fn toggle_all(&self) {
         let pause = self.any_running();
         let list = self.0.lock().unwrap();
-        for (tx, p, _) in list.iter() {
-            p.store(pause, Ordering::SeqCst);
-            let _ = tx.send(Cmd::SetPaused(pause));
+        for c in list.iter() {
+            c.paused.store(pause, Ordering::SeqCst);
+            let _ = c.tx.send(Cmd::SetPaused(pause));
         }
         let mut cfg = Config::load();
         for a in &mut cfg.accounts {
-            if list.iter().any(|(_, _, id)| id == &a.id) {
+            if list.iter().any(|c| c.id == a.id) {
                 a.paused = pause;
             }
         }
         let _ = cfg.save();
+    }
+
+    /// Gesamtzustand für das Taskleisten-Symbol.
+    fn tray_status(&self) -> tray::TrayStatus {
+        let list = self.0.lock().unwrap();
+        let multi = list.len() > 1;
+        let mut files = 0usize;
+        let mut bytes = 0u64;
+        let mut problem: Option<String> = None;
+        let mut all_paused = !list.is_empty();
+        for c in list.iter() {
+            let paused = c.paused.load(Ordering::SeqCst);
+            all_paused &= paused;
+            let sh = c.shared.lock().unwrap();
+            if let Some(p) = &sh.progress {
+                let p = p.lock().unwrap();
+                files += p.remaining_files();
+                bytes += p.remaining_bytes();
+            }
+            if !paused && problem.is_none() {
+                problem = match &sh.phase {
+                    Phase::Offline(_) => Some("Server nicht erreichbar".into()),
+                    Phase::NeedsLogin => Some("Bitte neu anmelden".into()),
+                    Phase::Error(e) => Some(e.clone()),
+                    _ => None,
+                };
+            }
+        }
+        let any_running = list.iter().any(|c| !c.paused.load(Ordering::SeqCst));
+        let pause_label = match (multi, any_running) {
+            (true, true) => "Alle pausieren",
+            (true, false) => "Alle fortsetzen",
+            (false, true) => "Pausieren",
+            (false, false) => "Fortsetzen",
+        };
+        let (state, tooltip) = if files > 0 {
+            (
+                tray::TrayState::Syncing,
+                format!("DropCraft – synchronisiere {files} {} · {}", if files == 1 { "Datei" } else { "Dateien" }, human_size(bytes as i64)),
+            )
+        } else if let Some(p) = problem {
+            (tray::TrayState::Problem, format!("DropCraft – {p}"))
+        } else if all_paused {
+            (tray::TrayState::Paused, "DropCraft – pausiert".to_string())
+        } else {
+            (tray::TrayState::Idle, "DropCraft – alles synchronisiert".to_string())
+        };
+        tray::TrayStatus { state, tooltip, pause_label }
     }
 }
 
@@ -179,10 +238,28 @@ struct AdminView {
     inbox: Pending<AdminMsg>,
 }
 
+enum SharesMsg {
+    List(Vec<Share>),
+    Created(String),
+    Deleted,
+    Failed(String),
+}
+
+struct SharesView {
+    account_id: String,
+    shares: Vec<Share>,
+    loading: bool,
+    info: Option<(bool, String)>,
+    last_link: Option<String>,
+    confirm_delete: Option<String>,
+    inbox: Pending<SharesMsg>,
+}
+
 enum Screen {
     Main,
     Form(AccountForm),
     Admin(AdminView),
+    Shares(SharesView),
 }
 
 // ================================================================ App
@@ -194,14 +271,13 @@ pub struct App {
     screen: Screen,
     controls: Controls,
     win: tray::WindowHandle,
-    _tray: Option<tray::Tray>,
-    tray_pause: Option<tray_icon::menu::MenuItem>,
     had_focus: bool,
+    share_requests: Arc<Mutex<Vec<PathBuf>>>,
     confirm_remove: bool,
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, listener: TcpListener, autostart: bool) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, listener: TcpListener, autostart: bool, initial_share: Option<PathBuf>) -> Self {
         theme::apply(&cc.egui_ctx);
         let ctx = cc.egui_ctx.clone();
         let win = tray::WindowHandle::default();
@@ -212,11 +288,19 @@ impl App {
         let controls = Controls::default();
         controls.rebuild(&rts);
 
-        // Zweiter Start der App öffnet nur das Popup der laufenden.
+        // Zweiter Start der App öffnet das Popup der laufenden; mit
+        // „--share <Pfad>“ (Explorer-Rechtsklick) wird ein Link erstellt.
+        let share_requests: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(initial_share.into_iter().collect()));
         {
-            let (win, ctx) = (win.clone(), ctx.clone());
+            let (win, ctx, reqs) = (win.clone(), ctx.clone(), share_requests.clone());
             std::thread::spawn(move || {
-                for _ in listener.incoming().flatten() {
+                for mut stream in listener.incoming().flatten() {
+                    let mut line = String::new();
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                    let _ = std::io::Read::read_to_string(&mut stream, &mut line);
+                    if let Some(p) = line.trim_end().strip_prefix("SHARE ") {
+                        reqs.lock().unwrap().push(PathBuf::from(p));
+                    }
                     win.show(&ctx, None);
                 }
             });
@@ -224,19 +308,14 @@ impl App {
 
         // Unter Linux braucht das Tray-Icon eine GTK-Schleife; die App ist
         // für Windows gedacht, dort läuft alles über das Taskleisten-Symbol.
-        let mut tray_obj = None;
-        let mut tray_pause = None;
         if cfg!(not(target_os = "linux")) {
-            if let Some((t, ids, pause_item)) = tray::create("Pausieren") {
-                let c = controls.clone();
-                tray::install_handlers(ids, win.clone(), ctx.clone(), move || c.toggle_all(), || std::process::exit(0));
-                tray_obj = Some(t);
-                tray_pause = Some(pause_item);
-            }
+            let (c1, c2) = (controls.clone(), controls.clone());
+            tray::spawn(move || c1.tray_status(), win.clone(), ctx.clone(), move || c2.toggle_all(), || std::process::exit(0));
         }
+        config::register_context_menu(&cfg.accounts);
 
         let screen = if cfg.accounts.is_empty() { Screen::Form(AccountForm::new(&cfg)) } else { Screen::Main };
-        if !autostart || cfg.accounts.is_empty() {
+        if !autostart || cfg.accounts.is_empty() || !share_requests.lock().unwrap().is_empty() {
             win.show(&ctx, None);
         }
 
@@ -247,9 +326,8 @@ impl App {
             screen,
             controls,
             win,
-            _tray: tray_obj,
-            tray_pause,
             had_focus: false,
+            share_requests,
             confirm_remove: false,
         }
     }
@@ -266,7 +344,8 @@ impl App {
             return;
         }
         let mut rt = self.rts.remove(idx);
-        rt.stop();
+        rt.send(Cmd::Remove);
+        rt.cmd = None;
         if let Some(token) = rt.acc.token.clone() {
             let server = rt.acc.server.clone();
             std::thread::spawn(move || {
@@ -279,6 +358,7 @@ impl App {
         self.cfg.accounts.retain(|a| a.id != rt.acc.id);
         self.save();
         self.controls.rebuild(&self.rts);
+        config::register_context_menu(&self.cfg.accounts);
         self.selected = self.selected.min(self.rts.len().saturating_sub(1));
         if self.rts.is_empty() {
             self.screen = Screen::Form(AccountForm::new(&self.cfg));
@@ -301,6 +381,177 @@ impl App {
         };
         admin_reload(&mut view, &rt.acc, ctx);
         self.screen = Screen::Admin(view);
+    }
+
+    fn open_shares(&mut self, idx: usize, ctx: &egui::Context) -> Option<&mut SharesView> {
+        let rt = self.rts.get(idx)?;
+        let mut view = SharesView {
+            account_id: rt.acc.id.clone(),
+            shares: Vec::new(),
+            loading: false,
+            info: None,
+            last_link: None,
+            confirm_delete: None,
+            inbox: Arc::new(Mutex::new(None)),
+        };
+        shares_reload(&mut view, &rt.acc, ctx);
+        self.selected = idx;
+        self.screen = Screen::Shares(view);
+        match &mut self.screen {
+            Screen::Shares(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Freigabe-Anfrage aus dem Explorer (Rechtsklick) oder dem Dialog.
+    fn share_path(&mut self, path: PathBuf, ctx: &egui::Context) {
+        let found = self.rts.iter().enumerate().find_map(|(i, r)| remote_path(&r.acc.sync_dir, &path).map(|rp| (i, rp)));
+        match found {
+            Some((i, rp)) => {
+                let acc = self.rts[i].acc.clone();
+                if let Some(view) = self.open_shares(i, ctx) {
+                    shares_create(view, &acc, ctx, rp);
+                }
+            }
+            None => {
+                let i = self.selected;
+                if let Some(view) = self.open_shares(i, ctx) {
+                    view.info = Some((false, format!("„{}“ liegt in keinem DropCraft-Ordner.", path.display())));
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ Freigaben
+
+    fn shares_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let mut pick: Option<bool> = None; // Some(true)=Ordner, Some(false)=Datei
+        let mut back = false;
+        {
+            let Screen::Shares(view) = &mut self.screen else { return };
+            let Some(rt) = self.rts.iter().find(|r| r.acc.id == view.account_id) else {
+                self.screen = Screen::Main;
+                return;
+            };
+            let acc = rt.acc.clone();
+
+            let msg = view.inbox.lock().unwrap().take();
+            if let Some(msg) = msg {
+                view.loading = false;
+                match msg {
+                    SharesMsg::List(l) => view.shares = l,
+                    SharesMsg::Created(url) => {
+                        let copied = copy_to_clipboard(&url);
+                        view.info = Some((true, if copied { "Link erstellt und kopiert".into() } else { "Link erstellt".into() }));
+                        view.last_link = Some(url);
+                        shares_reload(view, &acc, &ctx);
+                    }
+                    SharesMsg::Deleted => {
+                        view.info = Some((true, "Freigabe beendet – der Link funktioniert nicht mehr".into()));
+                        shares_reload(view, &acc, &ctx);
+                    }
+                    SharesMsg::Failed(m) => view.info = Some((false, m)),
+                }
+            }
+
+            header_band(ui, &format!("FREIGABEN · {}", acc.host().to_uppercase()));
+            let footer_h = 48.0;
+            let body_h = ui.available_height() - footer_h;
+            egui::ScrollArea::vertical().max_height(body_h).auto_shrink([false, false]).show(ui, |ui| {
+                egui::Frame::new().inner_margin(16).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new("Jeder mit dem Link kann den Inhalt ansehen und herunterladen – ohne DropCraft.").color(TEXT_DIM));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.add(egui::Button::new(theme::button_text("Ordner freigeben …").color(BG)).fill(ACCENT)).clicked() {
+                            pick = Some(true);
+                        }
+                        if ui.button(theme::button_text("Datei …")).clicked() {
+                            pick = Some(false);
+                        }
+                        if view.loading {
+                            ui.spinner();
+                        }
+                    });
+                    if let Some((ok, m)) = &view.info {
+                        ui.add_space(8.0);
+                        ui.horizontal_wrapped(|ui| {
+                            paint_icon(ui, if *ok { Icon::Check } else { Icon::Warning }, if *ok { OK } else { DANGER });
+                            ui.label(m);
+                        });
+                    }
+                    if let Some(link) = view.last_link.clone() {
+                        ui.add_space(6.0);
+                        egui::Frame::new().fill(BG).stroke(Stroke::new(1.0, ACCENT_DIM)).corner_radius(4).inner_margin(10).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.add(egui::Label::new(RichText::new(&link).monospace().size(11.0).color(ACCENT)).wrap());
+                            ui.horizontal(|ui| {
+                                if ui.small_button("Kopieren").clicked() {
+                                    copy_to_clipboard(&link);
+                                }
+                                if ui.small_button("Im Browser öffnen").clicked() {
+                                    open_url(&link);
+                                }
+                            });
+                        });
+                    }
+
+                    ui.add_space(14.0);
+                    ui.label(theme::label("Aktive Links"));
+                    ui.add_space(4.0);
+                    if view.shares.is_empty() && !view.loading {
+                        ui.label(RichText::new("Noch nichts freigegeben.").color(TEXT_DIM));
+                    }
+                    let api = Api::new(&acc.server, None).ok();
+                    for sh in view.shares.clone() {
+                        let url = api.as_ref().map(|a| a.share_url(&sh.token)).unwrap_or_default();
+                        egui::Frame::new().fill(RAISED).corner_radius(4).inner_margin(10).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            let name = sh.path.rsplit('/').next().unwrap_or(&sh.path);
+                            ui.add(egui::Label::new(RichText::new(name).color(TEXT).strong()).truncate()).on_hover_text(&sh.path);
+                            ui.add(egui::Label::new(RichText::new(&sh.path).size(11.0).color(TEXT_DIM)).truncate());
+                            ui.horizontal(|ui| {
+                                if ui.small_button("Link kopieren").clicked() {
+                                    if copy_to_clipboard(&url) {
+                                        view.info = Some((true, format!("Link für „{name}“ kopiert")));
+                                    }
+                                }
+                                if ui.small_button("Öffnen").clicked() {
+                                    open_url(&url);
+                                }
+                                if view.confirm_delete.as_deref() == Some(sh.token.as_str()) {
+                                    if ui.small_button(RichText::new("Wirklich beenden").color(DANGER)).clicked() {
+                                        view.confirm_delete = None;
+                                        shares_delete(view, &acc, &ctx, sh.token.clone());
+                                    }
+                                } else if ui.small_button(RichText::new("Beenden").color(DANGER)).clicked() {
+                                    view.confirm_delete = Some(sh.token.clone());
+                                }
+                            });
+                        });
+                        ui.add_space(4.0);
+                    }
+                });
+            });
+            footer_band(ui, footer_h, |ui| {
+                if ui.button(theme::button_text("Zurück")).clicked() {
+                    back = true;
+                }
+            });
+        }
+        if back {
+            self.screen = Screen::Main;
+            return;
+        }
+        if let Some(folder) = pick {
+            let start = self.rts[self.selected].acc.sync_dir.clone();
+            let dlg = rfd::FileDialog::new().set_directory(&start);
+            let chosen = if folder { dlg.pick_folder() } else { dlg.pick_file() };
+            if let Some(p) = chosen {
+                self.share_path(p, &ctx);
+            }
+        }
     }
 
     // ------------------------------------------------------------ Konto-Formular
@@ -342,6 +593,7 @@ impl App {
                     }
                     self.save();
                     self.controls.rebuild(&self.rts);
+                    config::register_context_menu(&self.cfg.accounts);
                     self.screen = Screen::Main;
                     return;
                 }
@@ -685,7 +937,6 @@ impl App {
 
         // Footer
         let mut action: Option<&str> = None;
-        let multi = self.rts.len() > 1;
         footer_band(ui, footer_h, |ui| {
             if ui.add(egui::Button::new(theme::button_text("Ordner öffnen")).min_size(Vec2::new(0.0, 36.0))).clicked() {
                 action = Some("open");
@@ -702,6 +953,10 @@ impl App {
                     ui.separator();
                     if ui.button("Jetzt synchronisieren").clicked() {
                         action = Some("sync");
+                        ui.close();
+                    }
+                    if ui.button("Freigaben …").clicked() {
+                        action = Some("shares");
                         ui.close();
                     }
                     if is_admin && ui.button("Benutzer verwalten …").clicked() {
@@ -750,6 +1005,10 @@ impl App {
             }
             Some("sync") => self.rts[self.selected].send(Cmd::SyncNow),
             Some("admin") => self.open_admin(&ctx),
+            Some("shares") => {
+                let i = self.selected;
+                self.open_shares(i, &ctx);
+            }
             Some("add") => self.screen = Screen::Form(AccountForm::new(&self.cfg)),
             Some("autostart") => {
                 config::set_autostart(self.cfg.autostart);
@@ -762,15 +1021,6 @@ impl App {
             _ => {}
         }
 
-        if let Some(item) = &self.tray_pause {
-            let any_running = self.rts.iter().any(|r| !r.paused.load(Ordering::SeqCst));
-            item.set_text(match (multi, any_running) {
-                (true, true) => "Alle pausieren",
-                (true, false) => "Alle fortsetzen",
-                (false, true) => "Pausieren",
-                (false, false) => "Fortsetzen",
-            });
-        }
     }
 }
 
@@ -779,9 +1029,17 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         let popup_mode = cfg!(not(target_os = "linux"));
 
+        // Freigabe-Anfragen aus dem Explorer-Rechtsklick
+        let reqs: Vec<PathBuf> = std::mem::take(&mut *self.share_requests.lock().unwrap());
+        for p in reqs {
+            if !self.rts.is_empty() {
+                self.share_path(p, &ctx);
+            }
+        }
+
         // Popup: beim Wegklicken oder mit Esc verschwinden (nicht während
         // des Kontoformulars, dort öffnen sich Ordner-Dialoge).
-        if popup_mode && !matches!(self.screen, Screen::Form(_)) {
+        if popup_mode && !matches!(self.screen, Screen::Form(_) | Screen::Shares(_)) {
             let focused = ctx.input(|i| i.viewport().focused);
             match focused {
                 Some(true) => self.had_focus = true,
@@ -804,6 +1062,7 @@ impl eframe::App for App {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(SURFACE)).show(ui, |ui| match self.screen {
             Screen::Form(_) => self.form_ui(ui),
             Screen::Admin(_) => self.admin_ui(ui),
+            Screen::Shares(_) => self.shares_ui(ui),
             Screen::Main => self.main_ui(ui),
         });
 
@@ -937,6 +1196,75 @@ fn user_row(ui: &mut egui::Ui, u: &UserInfo, view: &mut AdminView, acc: &Account
         }
     });
     ui.add_space(4.0);
+}
+
+fn shares_spawn(view: &mut SharesView, acc: &Account, ctx: &egui::Context, f: impl FnOnce(&Api) -> Result<SharesMsg, ApiError> + Send + 'static) {
+    view.loading = true;
+    let inbox = view.inbox.clone();
+    let ctx = ctx.clone();
+    let api = admin_api(acc);
+    std::thread::spawn(move || {
+        let msg = match api.and_then(|a| f(&a).map_err(api_msg)) {
+            Ok(m) => m,
+            Err(e) => SharesMsg::Failed(e),
+        };
+        *inbox.lock().unwrap() = Some(msg);
+        ctx.request_repaint();
+    });
+}
+
+fn shares_reload(view: &mut SharesView, acc: &Account, ctx: &egui::Context) {
+    shares_spawn(view, acc, ctx, |api| api.list_shares().map(SharesMsg::List));
+}
+
+fn shares_create(view: &mut SharesView, acc: &Account, ctx: &egui::Context, remote: String) {
+    view.info = None;
+    shares_spawn(view, acc, ctx, move |api| match api.create_share(&remote) {
+        Ok(s) => Ok(SharesMsg::Created(api.share_url(&s.token))),
+        Err(ApiError::NotFound) => Ok(SharesMsg::Failed("Noch nicht auf dem Server – bitte warten, bis es hochgeladen ist.".into())),
+        Err(e) => Err(e),
+    });
+}
+
+fn shares_delete(view: &mut SharesView, acc: &Account, ctx: &egui::Context, token: String) {
+    shares_spawn(view, acc, ctx, move |api| api.delete_share(&token).map(|_| SharesMsg::Deleted));
+}
+
+/// Lokaler Pfad im Sync-Ordner -> Server-Pfad. None, wenn außerhalb.
+fn remote_path(sync_dir: &std::path::Path, p: &std::path::Path) -> Option<String> {
+    let rel: PathBuf = match p.strip_prefix(sync_dir) {
+        Ok(r) => r.to_path_buf(),
+        // Unter Windows Groß-/Kleinschreibung ignorieren.
+        Err(_) if cfg!(windows) => {
+            let d = sync_dir.to_string_lossy().to_lowercase();
+            let d = d.trim_end_matches(['\\', '/']);
+            let full = p.to_string_lossy().to_string();
+            let lower = full.to_lowercase();
+            // Nur ganze Ordnernamen: "DropCraft" passt nicht auf "DropCraft ocv".
+            let boundary = lower.get(d.len()..).map(|r| r.is_empty() || r.starts_with(['\\', '/'])).unwrap_or(false);
+            if !lower.starts_with(d) || !boundary {
+                return None;
+            }
+            PathBuf::from(full.get(d.len()..)?.trim_start_matches(['\\', '/']))
+        }
+        Err(_) => return None,
+    };
+    let parts: Option<Vec<&str>> = rel.components().map(|c| c.as_os_str().to_str()).collect();
+    let r = parts?.join("/");
+    (!r.is_empty()).then_some(r)
+}
+
+fn copy_to_clipboard(text: &str) -> bool {
+    arboard::Clipboard::new().and_then(|mut c| c.set_text(text.to_string())).is_ok()
+}
+
+fn open_url(url: &str) {
+    #[cfg(windows)]
+    let _ = std::process::Command::new("explorer").arg(url).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
 fn admin_api(acc: &Account) -> Result<Api, String> {
@@ -1237,5 +1565,10 @@ mod tests {
         assert_eq!(eta(125.0), "ca. 3 Min.");
         assert_eq!(eta(3700.0), "ca. 1 Std. 1 Min.");
         assert_eq!(normalize_server("cloud.example.de/"), "https://cloud.example.de");
+        let root = std::path::Path::new("/home/j/DropCraft");
+        assert_eq!(remote_path(root, std::path::Path::new("/home/j/DropCraft/Fotos/Urlaub")).as_deref(), Some("Fotos/Urlaub"));
+        assert_eq!(remote_path(root, std::path::Path::new("/home/j/Andere")), None);
+        assert_eq!(remote_path(root, root), None);
+        assert_eq!(remote_path(root, std::path::Path::new("/home/j/DropCraft ocv/x.txt")), None);
     }
 }

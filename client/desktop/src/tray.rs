@@ -10,7 +10,7 @@ use std::{
 
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
-    MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent,
+    MouseButton, TrayIconBuilder, TrayIconEvent,
 };
 
 /// Das Würfel-Logo als RGBA-Bild, im Code gezeichnet.
@@ -69,16 +69,6 @@ pub(crate) fn line(px: &mut [u8], size: u32, a: (f32, f32), b: (f32, f32), thick
             }
         }
     }
-}
-
-pub struct Tray {
-    _icon: TrayIcon,
-}
-
-pub struct TrayIds {
-    pub open: MenuId,
-    pub pause: MenuId,
-    pub quit: MenuId,
 }
 
 /// Fenster-Steuerung. Unter Windows direkt über die Win32-API, weil egui
@@ -224,26 +214,164 @@ fn round_corners(hwnd: isize) {
     }
 }
 
-pub fn create(pause_label: &str) -> Option<(Tray, TrayIds, MenuItem)> {
-    let open = MenuItem::new("DropCraft öffnen", true, None);
-    let pause = MenuItem::new(pause_label, true, None);
-    let quit = MenuItem::new("Beenden", true, None);
-    let menu = Menu::new();
-    menu.append_items(&[&open, &pause, &PredefinedMenuItem::separator(), &quit]).ok()?;
-    let ids = TrayIds { open: open.id().clone(), pause: pause.id().clone(), quit: quit.id().clone() };
-    let icon = tray_icon::Icon::from_rgba(logo_rgba(32), 32, 32).ok()?;
-    let tray = TrayIconBuilder::new()
-        .with_tooltip("DropCraft")
-        .with_icon(icon)
-        .with_menu(Box::new(menu))
-        .with_menu_on_left_click(false)
-        .build()
-        .ok()?;
-    Some((Tray { _icon: tray }, ids, pause))
+/// Zustand des Taskleisten-Symbols.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrayState {
+    Idle,
+    Syncing,
+    Paused,
+    Problem,
+}
+
+pub struct TrayStatus {
+    pub state: TrayState,
+    pub tooltip: String,
+    pub pause_label: &'static str,
+}
+
+/// Disc mit weicher Kante.
+fn disc(px: &mut [u8], size: u32, c: (f32, f32), r: f32, col: [u8; 4]) {
+    for y in 0..size {
+        for x in 0..size {
+            let (dx, dy) = (x as f32 + 0.5 - c.0, y as f32 + 0.5 - c.1);
+            let cover = (r + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
+            if cover > 0.0 {
+                let i = ((y * size + x) * 4) as usize;
+                for k in 0..3 {
+                    px[i + k] = (px[i + k] as f32 * (1.0 - cover) + col[k] as f32 * cover) as u8;
+                }
+                px[i + 3] = px[i + 3].max((255.0 * cover) as u8);
+            }
+        }
+    }
+}
+
+/// Taskleisten-Symbol: Logo plus Abzeichen unten rechts. Beim Synchronisieren
+/// dreht sich ein Pfeil im Abzeichen (`frame` 0..8).
+pub fn tray_rgba(state: TrayState, frame: u32) -> Vec<u8> {
+    let size = 32u32;
+    let mut px = logo_rgba(size);
+    let s = size as f32;
+    let c = (s * 0.74, s * 0.74);
+    let r = s * 0.25;
+    let ink = [0x0b, 0x0e, 0x12, 0xff];
+    let t = s / 14.0;
+    match state {
+        TrayState::Idle => {}
+        TrayState::Syncing => {
+            disc(&mut px, size, c, r + 1.5, ink);
+            disc(&mut px, size, c, r, [0x19, 0xe3, 0xf0, 0xff]);
+            // Bogen mit Pfeilspitze, um frame*45° gedreht
+            let rot = frame as f32 * std::f32::consts::FRAC_PI_4;
+            let rr = r * 0.55;
+            let steps = 10;
+            let span = std::f32::consts::PI * 1.4;
+            let pt = |a: f32| (c.0 + rr * (a + rot).cos(), c.1 + rr * (a + rot).sin());
+            for k in 0..steps {
+                let a0 = span * k as f32 / steps as f32;
+                let a1 = span * (k + 1) as f32 / steps as f32;
+                line(&mut px, size, pt(a0), pt(a1), t, ink);
+            }
+            let tip = pt(span);
+            let back = pt(span - 0.6);
+            let n = (tip.0 - back.0, tip.1 - back.1);
+            line(&mut px, size, tip, (tip.0 - n.0 - n.1 * 0.8, tip.1 - n.1 + n.0 * 0.8), t, ink);
+            line(&mut px, size, tip, (tip.0 - n.0 + n.1 * 0.8, tip.1 - n.1 - n.0 * 0.8), t, ink);
+        }
+        TrayState::Paused => {
+            disc(&mut px, size, c, r + 1.5, ink);
+            disc(&mut px, size, c, r, [0x95, 0xa2, 0xb0, 0xff]);
+            line(&mut px, size, (c.0 - r * 0.3, c.1 - r * 0.45), (c.0 - r * 0.3, c.1 + r * 0.45), t * 1.2, ink);
+            line(&mut px, size, (c.0 + r * 0.3, c.1 - r * 0.45), (c.0 + r * 0.3, c.1 + r * 0.45), t * 1.2, ink);
+        }
+        TrayState::Problem => {
+            disc(&mut px, size, c, r + 1.5, ink);
+            disc(&mut px, size, c, r, [0xfb, 0xbf, 0x24, 0xff]);
+            line(&mut px, size, (c.0, c.1 - r * 0.55), (c.0, c.1 + r * 0.1), t * 1.2, ink);
+            disc(&mut px, size, (c.0, c.1 + r * 0.45), t * 0.7, ink);
+        }
+    }
+    px
+}
+
+/// Startet das Taskleisten-Symbol in einem eigenen Thread mit eigener
+/// Nachrichtenschleife. So kann es sich drehen und reagieren, auch wenn das
+/// Popup versteckt ist (dann läuft egui nicht).
+pub fn spawn(
+    status: impl Fn() -> TrayStatus + Send + 'static,
+    win: WindowHandle,
+    ctx: egui::Context,
+    on_pause: impl Fn() + Send + Sync + 'static,
+    on_quit: impl Fn() + Send + Sync + 'static,
+) {
+    let _ = std::thread::Builder::new().name("tray".into()).spawn(move || {
+        let open = MenuItem::new("DropCraft öffnen", true, None);
+        let pause = MenuItem::new("Pausieren", true, None);
+        let quit = MenuItem::new("Beenden", true, None);
+        let menu = Menu::new();
+        if menu.append_items(&[&open, &pause, &PredefinedMenuItem::separator(), &quit]).is_err() {
+            return;
+        }
+        let ids = TrayIds { open: open.id().clone(), pause: pause.id().clone(), quit: quit.id().clone() };
+        install_handlers(ids, win, ctx, on_pause, on_quit);
+
+        let icon = |st: TrayState, f: u32| tray_icon::Icon::from_rgba(tray_rgba(st, f), 32, 32).ok();
+        let Some(tray) = TrayIconBuilder::new()
+            .with_tooltip("DropCraft")
+            .with_icon(match icon(TrayState::Idle, 0) {
+                Some(i) => i,
+                None => return,
+            })
+            .with_menu(Box::new(menu))
+            .with_menu_on_left_click(false)
+            .build()
+            .ok()
+        else {
+            return;
+        };
+
+        let mut shown = (TrayState::Idle, 0u32);
+        let mut frame = 0u32;
+        let mut tooltip = String::new();
+        let mut pause_label = "";
+        let mut last = Instant::now() - Duration::from_secs(1);
+        loop {
+            pump_messages(100);
+            if last.elapsed() < Duration::from_millis(125) {
+                continue;
+            }
+            last = Instant::now();
+            let st = status();
+            let f = if st.state == TrayState::Syncing {
+                frame = (frame + 1) % 8;
+                frame
+            } else {
+                0
+            };
+            if (st.state, f) != shown {
+                let _ = tray.set_icon(icon(st.state, f));
+                shown = (st.state, f);
+            }
+            if st.tooltip != tooltip {
+                let _ = tray.set_tooltip(Some(&st.tooltip));
+                tooltip = st.tooltip;
+            }
+            if st.pause_label != pause_label {
+                pause.set_text(st.pause_label);
+                pause_label = st.pause_label;
+            }
+        }
+    });
+}
+
+struct TrayIds {
+    open: MenuId,
+    pause: MenuId,
+    quit: MenuId,
 }
 
 /// Klick-Ereignisse verarbeiten, auch wenn das Fenster versteckt ist.
-pub fn install_handlers(
+fn install_handlers(
     ids: TrayIds,
     win: WindowHandle,
     ctx: egui::Context,
@@ -269,6 +397,26 @@ pub fn install_handlers(
     }));
 }
 
+#[cfg(windows)]
+fn pump_messages(timeout_ms: u32) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, MsgWaitForMultipleObjects, PeekMessageW, TranslateMessage, MSG, PM_REMOVE, QS_ALLINPUT,
+    };
+    unsafe {
+        MsgWaitForMultipleObjects(0, std::ptr::null(), 0, timeout_ms, QS_ALLINPUT);
+        let mut msg: MSG = std::mem::zeroed();
+        while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn pump_messages(timeout_ms: u32) {
+    std::thread::sleep(Duration::from_millis(timeout_ms as u64));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,5 +436,16 @@ mod tests {
         assert_eq!(popup_position(work, (380, 580), Some(a), 12).1, 52);
         // Ohne Symbol: unten rechts
         assert_eq!(popup_position((0, 0, 1920, 1032), (380, 580), None, 12), (1528, 440));
+    }
+
+    #[test]
+    fn tray_icons_render() {
+        for st in [TrayState::Idle, TrayState::Syncing, TrayState::Paused, TrayState::Problem] {
+            for f in 0..8 {
+                let px = tray_rgba(st, f);
+                assert_eq!(px.len(), 32 * 32 * 4);
+                let _ = std::fs::write(std::env::temp_dir().join(format!("tray-{st:?}-{f}.rgba")), &px);
+            }
+        }
     }
 }
