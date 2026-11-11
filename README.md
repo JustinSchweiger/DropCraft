@@ -45,6 +45,9 @@ Die fertige Datei `client\target\release\DropCraft.exe` kannst du an einen belie
   eingeben, fertig. Speicher ändern, Passwort zurücksetzen, Benutzer löschen. Neue Benutzer sind nie Admins.
 - **Ordnersymbol:** Sync-Ordner bekommen im Explorer ein eigenes Symbol (über `desktop.ini`).
 - **Taskleisten-Symbol:** dreht sich beim Synchronisieren; grau = pausiert, gelb = Problem. Tooltip mit Restmenge.
+- **Freigabe-Optionen:** pro Link Upload für Gäste, Passwort, Ablaufdatum und Benachrichtigungen (Windows-Meldung,
+  wenn andere dort Dateien hinzufügen oder löschen). Die Seite zeigt Bilder/Videos als Galerie mit Vorschau.
+- **Einstellungen:** Bandbreitenlimit für Upload/Download; „Pausieren“ stoppt laufende Übertragungen sofort.
 - **Freigaben:** Rechtsklick auf Ordner/Datei im Sync-Ordner › „DropCraft-Link kopieren“ (Windows 11: unter
   „Weitere Optionen anzeigen“) oder Popup › Konto › „Freigaben …“. Der Link öffnet eine Webseite mit dem Inhalt,
   Einzel-Downloads und „Alles als ZIP“ – ohne DropCraft. Links lassen sich dort auch wieder beenden.
@@ -86,6 +89,24 @@ Updates: `git pull && docker compose up -d --build`
 Logs: `docker compose logs -f dropcraft`
 Backup: Ordner `deploy/data/` sichern (enthält Datenbank und alle Dateien).
 
+## Automatisches Deployment (GitHub Actions)
+
+- **CI** (`.github/workflows/ci.yml`): bei jedem Push Server-Tests, Sync-Kern-Tests und Windows-Builds
+  (mit und ohne `cloud-files`). Die fertigen `DropCraft.exe` liegen als Artefakte am Lauf.
+- **Deploy** (`.github/workflows/deploy.yml`): nach erfolgreicher CI auf `main` wird der Server aktualisiert
+  und die Windows-App unter `https://<domain>/download/windows` bereitgestellt (Startseite).
+
+Einmalig einrichten – auf dem Server:
+
+```bash
+ssh-keygen -t ed25519 -N "" -C github-deploy -f ~/.ssh/github_deploy
+cat ~/.ssh/github_deploy.pub >> ~/.ssh/authorized_keys
+cat ~/.ssh/github_deploy        # privaten Schlüssel kopieren
+```
+
+Dann im Repo unter **Settings › Secrets and variables › Actions** anlegen:
+`DEPLOY_HOST` = `dropcraft.tech`, `DEPLOY_SSH_KEY` = der kopierte private Schlüssel (komplett, mit BEGIN/END-Zeilen).
+
 ## Einstellungen (`deploy/.env`)
 
 | Variable | Bedeutung | Standard |
@@ -93,6 +114,7 @@ Backup: Ordner `deploy/data/` sichern (enthält Datenbank und alle Dateien).
 | `DROPCRAFT_DOMAIN` | Domain für HTTPS | – |
 | `DROPCRAFT_DEFAULT_QUOTA_GB` | Speicherlimit für neue Accounts | 20 |
 | `DROPCRAFT_OPEN_REGISTRATION` | Jeder darf sich registrieren | false |
+| `DROPCRAFT_ALIASES` | Weitere Adressen (z. B. alte Domain) | – |
 
 ## API
 
