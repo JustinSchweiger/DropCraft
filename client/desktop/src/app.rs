@@ -554,9 +554,7 @@ impl App {
                             ui.horizontal_wrapped(|ui| {
                                 ui.label(RichText::new("Gültig").color(TEXT_DIM));
                                 let current = match sh.expires_at {
-                                    Some(t) => chrono::DateTime::from_timestamp_millis(t)
-                                        .map(|d| format!("bis {}", d.with_timezone(&chrono::Local).format("%d.%m.%Y")))
-                                        .unwrap_or_default(),
+                                    Some(t) => expiry_text(t),
                                     None => "unbegrenzt".into(),
                                 };
                                 let mut choice: Option<i64> = None;
@@ -677,6 +675,14 @@ impl App {
                     ui.label("Mit Windows starten");
                 });
             }
+            ui.add_space(14.0);
+            ui.label(theme::label("Benachrichtigungen"));
+            ui.horizontal(|ui| {
+                if ui.button(theme::button_text("Test senden")).clicked() {
+                    std::thread::spawn(|| crate::notify::show("DropCraft", "So sehen Benachrichtigungen aus."));
+                }
+                ui.label(RichText::new("Kommt nichts an? Windows-Einstellungen → System → Benachrichtigungen → DropCraft").size(11.0).color(TEXT_DIM));
+            });
         });
         footer_band(ui, 48.0, |ui| {
             if ui.button(theme::button_text("Zurück")).clicked() {
@@ -1734,4 +1740,21 @@ mod tests {
         assert_eq!(remote_path(root, root), None);
         assert_eq!(remote_path(root, std::path::Path::new("/home/j/DropCraft ocv/x.txt")), None);
     }
+}
+
+/// "bis 18.11.2026, 23:57 · noch 6 Tage" bzw. "abgelaufen".
+fn expiry_text(at_ms: i64) -> String {
+    let Some(d) = chrono::DateTime::from_timestamp_millis(at_ms) else { return String::new() };
+    let left = at_ms - chrono::Utc::now().timestamp_millis();
+    if left <= 0 {
+        return "abgelaufen".into();
+    }
+    let hours = left / 3_600_000;
+    let rest = match hours {
+        0 => "unter 1 Stunde".to_string(),
+        1 => "noch 1 Stunde".to_string(),
+        2..=47 => format!("noch {hours} Stunden"),
+        _ => format!("noch {} Tage", hours / 24),
+    };
+    format!("bis {} · {rest}", d.with_timezone(&chrono::Local).format("%d.%m.%Y, %H:%M"))
 }

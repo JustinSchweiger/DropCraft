@@ -84,6 +84,7 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(shares::landing))
         .route("/download/windows", get(shares::download_app))
         .route("/assets/upload.js", get(shares::upload_js))
+        .route("/assets/player.js", get(shares::player_js))
         .route("/s/{token}", get(shares::page))
         .route("/s/{token}/view", get(shares::view))
         .route("/s/{token}/file", get(shares::file))

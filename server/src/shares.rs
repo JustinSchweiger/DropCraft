@@ -181,6 +181,7 @@ struct Resolved {
     rel: String,
     entry: Entry,
     allow_upload: bool,
+    expires_at: Option<i64>,
 }
 
 fn cookie_name(token: &str) -> String {
@@ -223,7 +224,7 @@ async fn resolve(state: &AppState, token: &str, rel: &str, headers: &HeaderMap) 
         .await
         .map_err(|e| e.into_response())?
         .ok_or_else(not_found_page)?;
-    Ok(Resolved { user_id, token: token.to_string(), root, rel, entry, allow_upload })
+    Ok(Resolved { user_id, token: token.to_string(), root, rel, entry, allow_upload, expires_at })
 }
 
 #[derive(Deserialize)]
@@ -399,25 +400,6 @@ pub async fn page(State(state): State<AppState>, Path(token): Path<String>, Quer
             ));
         }
 
-        // Galerie für Bilder und Videos
-        let media: Vec<&Entry> = items.iter().filter(|e| !e.is_dir && (is_image(name_of(e)) || is_video(name_of(e)))).collect();
-        if !media.is_empty() {
-            body.push_str(r#"<div class="gallery">"#);
-            for e in &media {
-                let name = name_of(e);
-                let rel = url_q(&rel_of(&r, name));
-                let thumb = if is_image(name) {
-                    format!(r#"<img src="{base}/file?p={rel}&amp;inline=1" alt="{}" loading="lazy">"#, esc(name))
-                } else {
-                    format!(
-                        r#"<video src="{base}/file?p={rel}&amp;inline=1#t=0.5" preload="metadata" muted playsinline></video><span class="play">{ICON_PLAY}</span>"#
-                    )
-                };
-                body.push_str(&format!(r#"<a class="tile" href="{base}/view?p={rel}" title="{}">{thumb}</a>"#, esc(name)));
-            }
-            body.push_str("</div>");
-        }
-
         if items.is_empty() {
             body.push_str(r#"<p class="empty">Dieser Ordner ist leer.</p>"#);
         }
@@ -436,9 +418,14 @@ pub async fn page(State(state): State<AppState>, Path(token): Path<String>, Quer
                 } else {
                     String::new()
                 };
+                let ic = if is_image(name) {
+                    format!(r#"<img src="{base}/file?p={rel}&amp;inline=1" alt="" loading="lazy">"#)
+                } else {
+                    icon_for(name).to_string()
+                };
                 body.push_str(&format!(
                     r#"<li><div class="row"><span class="ic">{}</span><span class="name">{}</span><span class="meta">{} · {}</span>{view}<a class="btn" href="{base}/file?p={rel}" aria-label="{} herunterladen">{ICON_DOWNLOAD}</a></div></li>"#,
-                    icon_for(name),
+                    ic,
                     esc(name),
                     human(e.size),
                     date(e.modified_at),
@@ -449,7 +436,7 @@ pub async fn page(State(state): State<AppState>, Path(token): Path<String>, Quer
         body.push_str("</ul>");
     } else {
         let name = name_of(&r.entry);
-        let preview = media_html(&base, &url_q(&r.rel), name, "single-media");
+        let preview = media_html(&base, &url_q(&r.rel), name, "single-media") + &wave_html(&base, &url_q(&r.rel), name, r.entry.size);
         body.push_str(&format!(
             r#"<div class="single">{}<div class="name">{}</div><div class="meta">{} · {}</div><div class="actions"><a class="btn primary" href="{base}/file?p={}">{ICON_DOWNLOAD}Herunterladen</a></div></div>"#,
             if preview.is_empty() { format!(r#"<span class="ic big">{}</span>"#, icon_for(name)) } else { preview },
@@ -459,7 +446,7 @@ pub async fn page(State(state): State<AppState>, Path(token): Path<String>, Quer
             url_q(&r.rel)
         ));
     }
-    page_html(&esc(&title), &format!(r#"<nav class="crumbs">{crumbs}</nav><h1>{}</h1>{body}"#, esc(&title)))
+    page_html(&esc(&title), &format!(r#"<nav class="crumbs">{crumbs}</nav><h1>{}</h1>{}{body}"#, esc(&title), expiry_html(r.expires_at)))
 }
 
 /// Vorschau-Seite für ein Bild/Video/Audio mit Vor/Zurück.
@@ -502,9 +489,11 @@ pub async fn view(State(state): State<AppState>, Path(token): Path<String>, Quer
         media
     };
     let body = format!(
-        r#"<nav class="crumbs"><a href="{back}">Zurück zum Ordner</a></nav><h1>{}</h1><div class="viewer">{media}</div>
+        r#"<nav class="crumbs"><a href="{back}">Zurück zum Ordner</a></nav><h1>{}</h1>{}<div class="viewer">{media}</div>{}
 <div class="viewer-bar">{}<span class="meta">{} · {}{}</span>{}<a class="btn primary" href="{base}/file?p={rel}">{ICON_DOWNLOAD}Herunterladen</a></div>"#,
         esc(&name),
+        expiry_html(r.expires_at),
+        wave_html(&base, &rel, &name, r.entry.size),
         nav(prev, "Zurück"),
         human(r.entry.size),
         date(r.entry.modified_at),
@@ -524,6 +513,24 @@ fn media_html(base: &str, rel: &str, name: &str, class: &str) -> String {
         format!(r#"<audio class="{class}" src="{src}" controls preload="metadata"></audio>"#)
     } else {
         String::new()
+    }
+}
+
+/// Wellenform unter Video/Audio (wird im Browser aus der Tonspur berechnet).
+fn wave_html(base: &str, rel: &str, name: &str, size: i64) -> String {
+    if !(is_video(name) || is_audio(name)) {
+        return String::new();
+    }
+    format!(
+        r#"<div class="wave" data-src="{base}/file?p={rel}&amp;inline=1" data-size="{size}"><canvas></canvas><div class="wave-status">Wellenform wird berechnet …</div></div>
+<div class="times"><span class="t-pos">00:00.0</span><span class="t-rem">-00:00.0</span></div><script src="/assets/player.js" defer></script>"#
+    )
+}
+
+fn expiry_html(expires_at: Option<i64>) -> String {
+    match expires_at {
+        Some(t) => format!(r#"<p class="expires">{ICON_CLOCK}Link gültig bis {}</p>"#, date_time(t)),
+        None => String::new(),
     }
 }
 
@@ -714,9 +721,9 @@ fn password_page(token: &str, wrong: bool) -> Response {
 fn page_html(title: &str, main: &str) -> Response {
     let html = format!(
         r#"<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="robots" content="noindex"><title>{title} · DropCraft</title><style>{CSS}</style></head>
+<meta name="robots" content="noindex"><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect width='20' height='20' rx='4' fill='%230b0e12'/%3E%3Cpath d='M10 2.5l6.5 3.75v7.5L10 17.5l-6.5-3.75v-7.5z M3.5 6.25L10 10l6.5-3.75M10 10v7.5' fill='none' stroke='%2319e3f0' stroke-width='1.4' stroke-linejoin='round'/%3E%3C/svg%3E"><title>{title} · DropCraft</title><style>{CSS}</style></head>
 <body><header><a class="brand" href="/">{ICON_CUBE}<span>DROPCRAFT</span></a></header>
-<main>{main}</main><footer>DropCraft</footer></body></html>"#
+<main>{main}</main></body></html>"#
     );
     let mut resp = Html(html).into_response();
     let h = resp.headers_mut();
@@ -754,6 +761,69 @@ document.addEventListener('dragleave',function(){if(--n<=0){n=0;f.classList.remo
 document.addEventListener('dragover',function(e){e.preventDefault();});
 document.addEventListener('drop',function(e){e.preventDefault();n=0;f.classList.remove('over');if(e.dataTransfer)send(e.dataTransfer.files);});
 })();"#;
+
+/// Wellenform-Player (Stil wie DMXCraft): Balken, gespielter Teil in Cyan,
+/// weiße Abspielmarke, Klicken/Ziehen springt, Zeit und Restzeit darunter.
+const PLAYER_JS: &str = r#"(function(){
+var w=document.querySelector('.wave');if(!w)return;
+var m=document.querySelector('video.viewer-media,audio.viewer-media,video.single-media,audio.single-media');if(!m)return;
+var c=w.querySelector('canvas'),st=w.querySelector('.wave-status'),tp=document.querySelector('.t-pos'),tr=document.querySelector('.t-rem');
+var peaks=null,ctx=c.getContext('2d');
+function clock(s){if(!isFinite(s)||s<0)s=0;var ms=Math.floor(s*1000);var mm=Math.floor(ms/60000),ss=Math.floor(ms/1000)%60,t=Math.floor(ms/100)%10;return(mm<10?'0':'')+mm+':'+(ss<10?'0':'')+ss+'.'+t;}
+function draw(){
+ var dpr=window.devicePixelRatio||1,W=c.clientWidth,H=c.clientHeight;
+ if(c.width!==Math.round(W*dpr)||c.height!==Math.round(H*dpr)){c.width=Math.round(W*dpr);c.height=Math.round(H*dpr);}
+ ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,W,H);
+ var d=m.duration,f=(d>0&&isFinite(d))?m.currentTime/d:0;
+ if(peaks){
+  var bars=Math.max(1,Math.floor((W-4)/3)),n=peaks.length;
+  for(var b=0;b<bars;b++){
+   var s0=Math.floor(b*n/bars),e0=Math.min(n,Math.max(s0+1,Math.floor((b+1)*n/bars))),pk=0;
+   for(var i=s0;i<e0;i++)if(peaks[i]>pk)pk=peaks[i];
+   var h=Math.max(2,pk*(H-8)),x=2+b*3;
+   ctx.fillStyle=(b/bars)<f?'#19e3f0':'#2b3542';
+   ctx.fillRect(x,(H-h)/2,2,h);
+  }
+ }
+ if(d>0&&isFinite(d)){ctx.fillStyle='#e6ecf2';ctx.fillRect(Math.min(W-2,Math.max(0,f*W-1)),0,2,H);}
+ if(tp){tp.textContent=clock(m.currentTime);tp.classList.toggle('on',!m.paused);}
+ if(tr){var r=(d||0)-m.currentTime;tr.textContent='-'+clock(r);tr.classList.toggle('warn',!m.paused&&r<10);}
+}
+var raf=0;function loop(){draw();if(!m.paused)raf=requestAnimationFrame(loop);}
+m.addEventListener('play',function(){cancelAnimationFrame(raf);loop();});
+['pause','seeked','timeupdate','loadedmetadata','durationchange'].forEach(function(ev){m.addEventListener(ev,draw);});
+window.addEventListener('resize',draw);
+var drag=false;
+function seek(e){var r=c.getBoundingClientRect(),f=Math.min(1,Math.max(0,(e.clientX-r.left)/r.width));if(m.duration>0&&isFinite(m.duration)){m.currentTime=f*m.duration;draw();}}
+w.addEventListener('pointerdown',function(e){drag=true;w.setPointerCapture(e.pointerId);seek(e);});
+w.addEventListener('pointermove',function(e){if(drag)seek(e);});
+w.addEventListener('pointerup',function(){drag=false;});
+draw();
+var size=+w.getAttribute('data-size')||0,AC=window.AudioContext||window.webkitAudioContext;
+if(!AC){st.textContent='';return;}
+if(size>500*1024*1024){st.textContent='Datei zu groß für eine Wellenform';return;}
+fetch(w.getAttribute('data-src'),{credentials:'same-origin'}).then(function(r){if(!r.ok)throw 0;return r.arrayBuffer();}).then(function(buf){
+ var ac=new AC();
+ return new Promise(function(ok,no){ac.decodeAudioData(buf,ok,no);}).then(function(ab){if(ac.close)ac.close();return ab;},function(e){if(ac.close)ac.close();throw e;});
+}).then(function(ab){
+ var N=2000,len=ab.length,out=new Float32Array(N),chs=[];
+ for(var k=0;k<ab.numberOfChannels;k++)chs.push(ab.getChannelData(k));
+ var step=Math.max(1,Math.floor(len/N/64)),max=0;
+ for(var i=0;i<N;i++){var a=Math.floor(i*len/N),z=Math.floor((i+1)*len/N),p=0;
+  for(var q=0;q<chs.length;q++){var ch=chs[q];for(var j=a;j<z;j+=step){var v=ch[j];if(v<0)v=-v;if(v>p)p=v;}}
+  out[i]=p;if(p>max)max=p;}
+ if(max>0)for(var i2=0;i2<N;i2++)out[i2]/=max;
+ peaks=out;st.textContent='';draw();
+}).catch(function(){st.textContent='Keine Tonspur gefunden';});
+})();"#;
+
+pub async fn player_js() -> Response {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8"), (header::CACHE_CONTROL, "public, max-age=3600")],
+        PLAYER_JS,
+    )
+        .into_response()
+}
 
 pub async fn upload_js() -> Response {
     (
@@ -831,11 +901,38 @@ fn human(b: i64) -> String {
     }
 }
 
+/// Unix-Millisekunden in deutsche Ortszeit (MEZ/MESZ).
+fn local_ms(ms: i64) -> i64 {
+    let (y, _, _) = civil_from_days(ms.div_euclid(86_400_000));
+    // Sommerzeit: letzter Sonntag im März 01:00 UTC bis letzter Sonntag im Oktober 01:00 UTC.
+    let last_sunday = |m: u32| {
+        let d = days_from_civil(y, m, 31);
+        d - (d + 4).rem_euclid(7)
+    };
+    let start = last_sunday(3) * 86_400_000 + 3_600_000;
+    let end = last_sunday(10) * 86_400_000 + 3_600_000;
+    ms + if ms >= start && ms < end { 7_200_000 } else { 3_600_000 }
+}
+
 fn date(ms: i64) -> String {
-    // Tag.Monat.Jahr aus Unix-Millisekunden (UTC reicht für die Anzeige).
-    let days = ms.div_euclid(86_400_000);
-    let (y, m, d) = civil_from_days(days);
+    let (y, m, d) = civil_from_days(local_ms(ms).div_euclid(86_400_000));
     format!("{d:02}.{m:02}.{y}")
+}
+
+fn date_time(ms: i64) -> String {
+    let l = local_ms(ms);
+    let mins = l.rem_euclid(86_400_000) / 60_000;
+    format!("{}, {:02}:{:02} Uhr", date(ms), mins / 60, mins % 60)
+}
+
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 } as i64;
+    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
@@ -878,7 +975,7 @@ const ICON_IMAGE: &str = r##"<svg width="20" height="20" viewBox="0 0 16 16" fil
 const ICON_DOWNLOAD: &str = r##"<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5v8M5 7.5l3 3 3-3"/><path d="M2.5 10.5v3h11v-3"/></svg>"##;
 
 const ICON_UPLOAD_BIG: &str = r##"<svg width="34" height="34" viewBox="0 0 16 16" fill="none" stroke="#19e3f0" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 10.5V2.5M5 5.5l3-3 3 3"/><path d="M2.5 10.5v3h11v-3"/></svg>"##;
-const ICON_PLAY: &str = r##"<svg width="28" height="28" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="7.5" fill="rgba(11,14,18,.7)"/><path d="M6.5 5v6l5-3z" fill="#e6ecf2"/></svg>"##;
+const ICON_CLOCK: &str = r##"<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.5 1.5"/></svg>"##;
 const ICON_MEDIA: &str = r##"<svg width="20" height="20" viewBox="0 0 16 16" fill="none" stroke="#f45db8" stroke-width="1.2" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1"/><path d="M6.5 6v4l3.5-2z"/></svg>"##;
 const ICON_LOCK: &str = r##"<svg width="44" height="44" viewBox="0 0 16 16" fill="none" stroke="#19e3f0" stroke-width="1.1" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="10" height="7" rx="1"/><path d="M5 7V5a3 3 0 0 1 6 0v2"/></svg>"##;
 const ICON_CUBE_BIG: &str = r##"<svg width="64" height="64" viewBox="0 0 20 20" fill="none" stroke="#19e3f0" stroke-width="1.1" stroke-linejoin="round" aria-hidden="true"><path d="M10 2.5l6.5 3.75v7.5L10 17.5l-6.5-3.75v-7.5z"/><path d="M3.5 6.25L10 10l6.5-3.75M10 10v7.5"/></svg>"##;
@@ -901,6 +998,15 @@ h1{font-weight:400;font-size:26px;margin:4px 0 16px;overflow-wrap:anywhere}
 a.row:hover{background:#1a2028}
 .ic{width:36px;height:36px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;border-radius:4px;background:#1a2028}
 .ic.dir{background:#0b0e12}
+.ic img{width:100%;height:100%;object-fit:cover;border-radius:4px;display:block}
+.expires{display:flex;align-items:center;gap:6px;margin:-8px 0 16px;color:#95a2b0;font-size:13px}
+.wave{position:relative;height:96px;margin-top:12px;border-radius:4px;background:#0b0e12;border:1px solid #28303a;cursor:pointer;touch-action:none}
+.wave canvas{width:100%;height:100%;display:block}
+.wave-status{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#55606c;font-size:13px;pointer-events:none}
+.times{display:flex;justify-content:space-between;align-items:baseline;margin-top:6px;font-variant-numeric:tabular-nums}
+.t-pos{font-size:26px;color:#95a2b0}.t-pos.on{color:#19e3f0}
+.t-rem{font-size:15px;color:#95a2b0}.t-rem.warn{color:#fbbf24}
+.single .wave,.single .times{width:100%}
 .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .btn{display:inline-flex;align-items:center;gap:6px;height:36px;min-width:36px;justify-content:center;padding:0 12px;border:1px solid #28303a;border-radius:4px;background:#1a2028;color:#e6ecf2;text-decoration:none;font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase}
 .btn:hover{background:#232b35;border-color:#0c5c64}
@@ -910,7 +1016,6 @@ a.row:hover{background:#1a2028}
 .ic.big{width:72px;height:72px}.ic.big svg{width:40px;height:40px}
 .actions{display:flex;gap:8px;margin-top:8px}
 .empty{color:#95a2b0}
-footer{text-align:center;color:#55606c;font-size:12px;padding:16px}
 .notice{background:#0c5c64;border:1px solid #19e3f0;border-radius:4px;padding:10px 12px}
 .error{color:#ef4455}
 .drop{position:relative;margin:0 0 16px}
@@ -926,11 +1031,6 @@ footer{text-align:center;color:#55606c;font-size:12px;padding:16px}
 .track{height:6px;border-radius:3px;background:#1a2028;overflow:hidden}.fill{height:100%;width:0;background:#19e3f0;transition:width .15s}
 .drop.failed .fill{background:#ef4455}
 .drop noscript .btn{margin-top:10px}
-.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;margin:0 0 16px}
-.tile{position:relative;display:block;aspect-ratio:1;border-radius:6px;overflow:hidden;background:#1a2028;border:1px solid #28303a}
-.tile img,.tile video{width:100%;height:100%;object-fit:cover;display:block}
-.tile:hover{border-color:#19e3f0}
-.play{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
 .viewer{display:flex;justify-content:center;align-items:center;background:#000;border:1px solid #28303a;border-radius:8px;min-height:240px;overflow:hidden}
 .viewer-media{max-width:100%;max-height:72vh;display:block}
 audio.viewer-media{width:100%;margin:40px 16px}
@@ -966,6 +1066,15 @@ mod tests {
     fn escaping() {
         assert_eq!(esc("<a href=\"x\">&'"), "&lt;a href=&quot;x&quot;&gt;&amp;&#39;");
         assert_eq!(url_q("Fotos/Ür laub&x"), "Fotos/%C3%9Cr%20laub%26x");
+    }
+
+    #[test]
+    fn local_time() {
+        // 1.7.2026 12:00 UTC -> 14:00 MESZ; 1.1.2026 12:00 UTC -> 13:00 MEZ
+        assert_eq!(date_time(1_782_907_200_000), "01.07.2026, 14:00 Uhr");
+        assert_eq!(date_time(1_767_268_800_000), "01.01.2026, 13:00 Uhr");
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(civil_from_days(days_from_civil(2026, 11, 11)), (2026, 11, 11));
     }
 
     #[test]

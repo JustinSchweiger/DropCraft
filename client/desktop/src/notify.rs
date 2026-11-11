@@ -59,8 +59,39 @@ pub fn summary(added: usize, removed: usize, who: &[String]) -> String {
     s
 }
 
+/// Eigene App-ID, damit Meldungen als „DropCraft“ (mit Symbol) erscheinen und
+/// nicht unter „PowerShell“, das bei vielen abgeschaltet ist.
+#[cfg(windows)]
+const APP_ID: &str = "DropCraft.App";
+
+#[cfg(windows)]
+fn register_app_id() {
+    use winreg::{enums::HKEY_CURRENT_USER, RegKey};
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let icon = crate::config::app_dir().join("dropcraft.ico");
+        if !icon.exists() {
+            let _ = std::fs::create_dir_all(crate::config::app_dir());
+            let _ = std::fs::write(&icon, crate::icons::ico_bytes(&[16, 32, 48, 256], crate::icons::logo_rgba));
+        }
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        if let Ok((key, _)) = hkcu.create_subkey(format!("Software\\Classes\\AppUserModelId\\{APP_ID}")) {
+            let _ = key.set_value("DisplayName", &"DropCraft");
+            let _ = key.set_value("IconUri", &icon.display().to_string());
+            let _ = key.set_value("IconBackgroundColor", &"FF0B0E12");
+        }
+    });
+}
+
 pub fn show(title: &str, body: &str) {
-    let res = notify_rust::Notification::new().appname("DropCraft").summary(title).body(body).show();
+    let mut n = notify_rust::Notification::new();
+    n.appname("DropCraft").summary(title).body(body);
+    #[cfg(windows)]
+    {
+        register_app_id();
+        n.app_id(APP_ID);
+    }
+    let res = n.show();
     if let Err(e) = res {
         log::warn!("Benachrichtigung fehlgeschlagen: {e}");
     }
