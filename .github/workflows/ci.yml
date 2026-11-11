@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  server-und-kern:
+    name: Server + Sync-Kern (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            server -> target
+            client -> target
+      - name: Server bauen
+        working-directory: server
+        run: cargo build --release
+      - name: Server-API-Tests
+        working-directory: server
+        run: cargo test --release && ./tests/api_test.sh
+      - name: Sync-Kern-Tests (gegen echten Server)
+        working-directory: client
+        run: cargo test -p dropcraft-core
+
+  windows:
+    name: Windows-App ${{ matrix.variant }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: standard
+            flags: ""
+          - variant: cloud-files
+            flags: "--features cloud-files"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client -> target
+          key: ${{ matrix.variant }}
+      - name: Bauen
+        working-directory: client
+        run: cargo build --release -p dropcraft-desktop ${{ matrix.flags }}
+      - name: Tests
+        working-directory: client
+        run: cargo test -p dropcraft-desktop ${{ matrix.flags }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DropCraft-${{ matrix.variant }}
+          path: client/target/release/DropCraft.exe
