@@ -1585,12 +1585,13 @@ fn user_row(ui: &mut egui::Ui, u: &UserInfo, view: &mut AdminView, acc: &Account
         view.edit = if editing { None } else { Some((u.id, fmt_gb(u.quota_bytes as f64 / 1024f64.powi(3)), String::new())) };
         view.confirm_delete = None;
     }
-    if !editing {
+    // Nach dem Klick neu prüfen: Zuklappen setzt `edit` auf None.
+    if view.edit.as_ref().map(|e| e.0) != Some(u.id) {
         return;
     }
     egui::Frame::new().outer_margin(egui::Margin { left: 12, right: 12, top: 0, bottom: 8 }).inner_margin(10).fill(RAISED).corner_radius(4).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        let (_, gb, pw) = view.edit.as_mut().unwrap();
+        let Some((_, gb, pw)) = view.edit.as_mut() else { return };
         egui::Grid::new(("edit", u.id)).num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
             ui.label(RichText::new("Speicher").color(TEXT_DIM));
             ui.horizontal(|ui| {
