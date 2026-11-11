@@ -127,7 +127,10 @@ fn placeholders_pin_and_free() {
     a.sync_once().unwrap();
 
     // 1. B bekommt nur Platzhalter, lädt nichts herunter.
-    b.sync_once().unwrap();
+    let r = b.sync_once().unwrap();
+    let ev = r.events.iter().find(|e| e.path == "Doks/b.txt").expect("Ereignis fehlt");
+    assert_eq!(ev.kind, dropcraft_core::EventKind::NewOnline);
+    assert_eq!(ev.by.as_deref(), Some("PC"), "Urheber kommt vom Server");
     assert_eq!(b.progress().lock().unwrap().bytes_down, 0, "nichts sollte geladen werden");
     assert_eq!(fs::metadata(rb.join("Fotos/a.jpg")).unwrap().len(), 300_000);
     assert!(fake.is_online_only(&rb.join("Fotos/a.jpg")));
@@ -175,4 +178,21 @@ fn placeholders_pin_and_free() {
     a.sync_once().unwrap();
     assert_eq!(fs::read(ra.join("neu.txt")).unwrap(), b"vom Laptop");
     assert!(!fake.is_online_only(&rb.join("neu.txt")));
+
+    // 7. Pausieren bricht sofort ab, Fortsetzen macht weiter.
+    let pause = dropcraft_core::PauseFlag::default();
+    a.set_pause_flag(pause.clone());
+    write(&ra, "gross.bin", &vec![9u8; 2_000_000]);
+    pause.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(matches!(a.sync_once(), Err(dropcraft_core::SyncError::Paused)));
+    pause.store(false, std::sync::atomic::Ordering::SeqCst);
+
+    // 8. Bandbreitenlimit: 2 MB bei 1 MB/s dauern gut eine Sekunde.
+    let bw = dropcraft_core::BandwidthRef::default();
+    bw.up.set_limit(1_000_000);
+    a.set_bandwidth(bw);
+    let t = std::time::Instant::now();
+    let r = a.sync_once().unwrap();
+    assert_eq!(r.uploaded, 1);
+    assert!(t.elapsed() > Duration::from_millis(800), "Limit wirkt nicht: {:?}", t.elapsed());
 }

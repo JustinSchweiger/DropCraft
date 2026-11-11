@@ -25,7 +25,7 @@ pub fn hash_password(pw: &str) -> anyhow::Result<String> {
         .to_string())
 }
 
-fn verify_password(pw: &str, hash: &str) -> bool {
+pub fn verify_password(pw: &str, hash: &str) -> bool {
     PasswordHash::new(hash)
         .map(|h| Argon2::default().verify_password(pw.as_bytes(), &h).is_ok())
         .unwrap_or(false)
@@ -62,6 +62,8 @@ pub struct AuthUser {
     pub id: i64,
     pub is_admin: bool,
     pub token_hash: String,
+    /// Name des angemeldeten Geräts (für „geändert von …“).
+    pub device_name: String,
 }
 
 impl FromRequestParts<AppState> for AuthUser {
@@ -75,13 +77,13 @@ impl FromRequestParts<AppState> for AuthUser {
             .ok_or(ApiError::Unauthorized)?;
         let token = header.strip_prefix("Bearer ").ok_or(ApiError::Unauthorized)?;
         let token_hash = hash_token(token.trim());
-        let row: Option<(i64, i64, i64)> = sqlx::query_as(
-            "SELECT u.id, u.is_admin, s.last_used FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?",
+        let row: Option<(i64, i64, i64, String)> = sqlx::query_as(
+            "SELECT u.id, u.is_admin, s.last_used, s.device_name FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?",
         )
         .bind(&token_hash)
         .fetch_optional(&state.db)
         .await?;
-        let (id, is_admin, last_used) = row.ok_or(ApiError::Unauthorized)?;
+        let (id, is_admin, last_used, device_name) = row.ok_or(ApiError::Unauthorized)?;
         // "Zuletzt benutzt" nur grob (stündlich) aktualisieren, um Schreibzugriffe zu sparen.
         let now = now_ms();
         if now - last_used > 3_600_000 {
@@ -91,7 +93,7 @@ impl FromRequestParts<AppState> for AuthUser {
                 .execute(&state.db)
                 .await;
         }
-        Ok(AuthUser { id, is_admin: is_admin != 0, token_hash })
+        Ok(AuthUser { id, is_admin: is_admin != 0, token_hash, device_name })
     }
 }
 

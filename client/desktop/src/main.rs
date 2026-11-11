@@ -8,6 +8,7 @@ mod config;
 mod folder_icon;
 #[allow(dead_code)]
 mod icons;
+mod notify;
 mod theme;
 mod tray;
 mod worker;

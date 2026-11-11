@@ -25,6 +25,7 @@ raw-window-handle = "0.6"
 log = "0.4"
 
 arboard = { version = "3", default-features = false }
+notify-rust = "4"
 
 [features]
 # Platzhalter-Dateien, Status-Spalte im Explorer, „Immer auf diesem Gerät behalten“

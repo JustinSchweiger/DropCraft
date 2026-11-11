@@ -30,9 +30,11 @@ pub struct Entry {
     pub deleted: bool,
     #[serde(skip)]
     pub blob_id: Option<String>,
+    /// Gerät oder Gast, das die letzte Änderung gemacht hat.
+    pub modified_by: Option<String>,
 }
 
-const ENTRY_COLS: &str = "path, is_dir, size, sha256, modified_at, rev, deleted, blob_id";
+const ENTRY_COLS: &str = "path, is_dir, size, sha256, modified_at, rev, deleted, blob_id, modified_by";
 
 type Tx<'a> = Transaction<'a, Sqlite>;
 
@@ -42,6 +44,22 @@ async fn next_rev(tx: &mut Tx<'_>, user_id: i64) -> ApiResult<i64> {
         .fetch_one(&mut **tx)
         .await?;
     Ok(rev)
+}
+
+async fn cursor_now(tx: &mut Tx<'_>, user_id: i64) -> ApiResult<i64> {
+    let (c,): (i64,) = sqlx::query_as("SELECT cursor FROM users WHERE id = ?").bind(user_id).fetch_one(&mut **tx).await?;
+    Ok(c)
+}
+
+/// Alle in dieser Transaktion geänderten Einträge mit dem Urheber versehen.
+async fn stamp(tx: &mut Tx<'_>, user_id: i64, since: i64, by: &str) -> ApiResult<()> {
+    sqlx::query("UPDATE files SET modified_by = ? WHERE user_id = ? AND rev > ?")
+        .bind(by)
+        .bind(user_id)
+        .bind(since)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 async fn get_live(tx: &mut Tx<'_>, user_id: i64, path: &str) -> ApiResult<Option<Entry>> {
@@ -238,34 +256,63 @@ pub async fn upload(
     body: Body,
 ) -> ApiResult<(StatusCode, Json<Entry>)> {
     let path = paths::normalize_non_root(&q.path)?;
-    let mtime = q.mtime.unwrap_or_else(now_ms);
+    let declared = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<i64>().ok());
+    let (status, entry) = store_file(
+        &state,
+        user.id,
+        path,
+        body.into_data_stream(),
+        declared,
+        q.mtime.unwrap_or_else(now_ms),
+        q.base_rev,
+        &user.device_name,
+    )
+    .await?;
+    Ok((status, Json(entry)))
+}
+
+/// Speichert eine hochgeladene Datei (App oder Gast-Upload über einen Link).
+#[allow(clippy::too_many_arguments)]
+pub async fn store_file<S, E>(
+    state: &AppState,
+    user_id: i64,
+    path: String,
+    stream: S,
+    declared: Option<i64>,
+    mtime: i64,
+    base_rev: Option<i64>,
+    by: &str,
+) -> ApiResult<(StatusCode, Entry)>
+where
+    S: futures_util::Stream<Item = Result<axum::body::Bytes, E>> + Unpin,
+    E: std::fmt::Display,
+{
 
     // Grobe Vorprüfung, damit wir nicht unnötig hochladen.
     let (quota, used): (i64, i64) = sqlx::query_as("SELECT quota_bytes, used_bytes FROM users WHERE id = ?")
-        .bind(user.id)
+        .bind(user_id)
         .fetch_one(&state.db)
         .await?;
-    let existing = get_live_pool(&state, user.id, &path).await?;
+    let existing = get_live_pool(&state, user_id, &path).await?;
     if let Some(e) = &existing {
         if e.is_dir {
             return Err(ApiError::Conflict("Pfad ist ein Ordner".into()));
         }
     }
-    check_base_rev(existing.as_ref(), q.base_rev)?;
+    check_base_rev(existing.as_ref(), base_rev)?;
     let old_size = existing.as_ref().map(|e| e.size).unwrap_or(0);
     let allowed = quota - used + old_size;
     // Größe vorab prüfen, wenn der Client sie mitschickt.
-    let declared = headers
-        .get(header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<i64>().ok());
     if declared.map(|n| n > allowed).unwrap_or(false) {
         return Err(ApiError::QuotaExceeded);
     }
 
     // In eine temporäre Datei streamen, dabei hashen und Größe prüfen.
     let tmp_path = state.tmp_dir().join(uuid::Uuid::new_v4().to_string());
-    let result = stream_to_file(body, &tmp_path, allowed).await;
+    let result = stream_to_file(stream, &tmp_path, allowed).await;
     let (size, sha) = match result {
         Ok(v) => v,
         Err(e) => {
@@ -278,41 +325,43 @@ pub async fn upload(
     if let Some(e) = &existing {
         if e.sha256.as_deref() == Some(sha.as_str()) && e.size == size {
             let _ = tokio::fs::remove_file(&tmp_path).await;
-            return Ok((StatusCode::OK, Json(e.clone())));
+            return Ok((StatusCode::OK, e.clone()));
         }
     }
 
     let blob_id = uuid::Uuid::new_v4().to_string();
-    let blob_path = state.user_blob_dir(user.id).join(&blob_id);
-    tokio::fs::create_dir_all(state.user_blob_dir(user.id)).await?;
+    let blob_path = state.user_blob_dir(user_id).join(&blob_id);
+    tokio::fs::create_dir_all(state.user_blob_dir(user_id)).await?;
     tokio::fs::rename(&tmp_path, &blob_path).await?;
 
     let committed: ApiResult<(Entry, Option<String>)> = async {
         let mut tx = state.db.begin_with("BEGIN IMMEDIATE").await?;
-        let current = get_live(&mut tx, user.id, &path).await?;
+        let current = get_live(&mut tx, user_id, &path).await?;
         if let Some(c) = &current {
             if c.is_dir {
                 return Err(ApiError::Conflict("Pfad ist ein Ordner".into()));
             }
         }
-        check_base_rev(current.as_ref(), q.base_rev)?;
+        check_base_rev(current.as_ref(), base_rev)?;
         let old_size = current.as_ref().map(|c| c.size).unwrap_or(0);
         let delta = size - old_size;
         let r = sqlx::query(
             "UPDATE users SET used_bytes = used_bytes + ? WHERE id = ? AND used_bytes + ? <= quota_bytes",
         )
         .bind(delta)
-        .bind(user.id)
+        .bind(user_id)
         .bind(delta)
         .execute(&mut *tx)
         .await?;
         if r.rows_affected() == 0 && delta > 0 {
             return Err(ApiError::QuotaExceeded);
         }
-        ensure_parents(&mut tx, user.id, &path).await?;
-        let rev = next_rev(&mut tx, user.id).await?;
-        upsert(&mut tx, user.id, &path, false, size, Some(&sha), Some(&blob_id), mtime, rev).await?;
-        let entry = get_live(&mut tx, user.id, &path).await?.ok_or(ApiError::NotFound)?;
+        let since = cursor_now(&mut tx, user_id).await?;
+        ensure_parents(&mut tx, user_id, &path).await?;
+        let rev = next_rev(&mut tx, user_id).await?;
+        upsert(&mut tx, user_id, &path, false, size, Some(&sha), Some(&blob_id), mtime, rev).await?;
+        stamp(&mut tx, user_id, since, by).await?;
+        let entry = get_live(&mut tx, user_id, &path).await?.ok_or(ApiError::NotFound)?;
         tx.commit().await?;
         Ok((entry, current.and_then(|c| c.blob_id)))
     }
@@ -321,10 +370,10 @@ pub async fn upload(
     match committed {
         Ok((entry, old_blob)) => {
             if let Some(old) = old_blob {
-                let _ = tokio::fs::remove_file(state.user_blob_dir(user.id).join(old)).await;
+                let _ = tokio::fs::remove_file(state.user_blob_dir(user_id).join(old)).await;
             }
             let status = if existing.is_some() { StatusCode::OK } else { StatusCode::CREATED };
-            Ok((status, Json(entry)))
+            Ok((status, entry))
         }
         Err(e) => {
             let _ = tokio::fs::remove_file(&blob_path).await;
@@ -343,12 +392,15 @@ fn check_base_rev(current: Option<&Entry>, base_rev: Option<i64>) -> ApiResult<(
     }
 }
 
-async fn stream_to_file(body: Body, path: &std::path::Path, max_bytes: i64) -> ApiResult<(i64, String)> {
+async fn stream_to_file<S, E>(mut stream: S, path: &std::path::Path, max_bytes: i64) -> ApiResult<(i64, String)>
+where
+    S: futures_util::Stream<Item = Result<axum::body::Bytes, E>> + Unpin,
+    E: std::fmt::Display,
+{
     let file = tokio::fs::File::create(path).await?;
     let mut out = tokio::io::BufWriter::with_capacity(1 << 20, file);
     let mut hasher = Sha256::new();
     let mut size: i64 = 0;
-    let mut stream = body.into_data_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| ApiError::BadRequest(format!("Upload abgebrochen: {e}")))?;
         size += chunk.len() as i64;
@@ -490,9 +542,11 @@ pub async fn mkdir(
             Err(ApiError::Conflict("Es gibt schon eine Datei mit diesem Namen".into()))
         };
     }
+    let since = cursor_now(&mut tx, user.id).await?;
     ensure_parents(&mut tx, user.id, &path).await?;
     let rev = next_rev(&mut tx, user.id).await?;
     upsert(&mut tx, user.id, &path, true, 0, None, None, now_ms(), rev).await?;
+    stamp(&mut tx, user.id, since, &user.device_name).await?;
     let e = get_live(&mut tx, user.id, &path).await?.ok_or(ApiError::NotFound)?;
     tx.commit().await?;
     Ok((StatusCode::CREATED, Json(e)))
@@ -509,6 +563,7 @@ pub async fn delete(
     if subtree.is_empty() {
         return Err(ApiError::NotFound);
     }
+    let since = cursor_now(&mut tx, user.id).await?;
     let mut freed = 0i64;
     let mut blobs = Vec::new();
     // Kinder zuerst als gelöscht markieren.
@@ -525,6 +580,7 @@ pub async fn delete(
         .bind(user.id)
         .execute(&mut *tx)
         .await?;
+    stamp(&mut tx, user.id, since, &user.device_name).await?;
     tx.commit().await?;
     for b in blobs {
         let _ = tokio::fs::remove_file(state.user_blob_dir(user.id).join(b)).await;
@@ -559,6 +615,7 @@ pub async fn move_entry(
     if get_live(&mut tx, user.id, &to).await?.is_some() {
         return Err(ApiError::Conflict("Ziel existiert bereits".into()));
     }
+    let since = cursor_now(&mut tx, user.id).await?;
     ensure_parents(&mut tx, user.id, &to).await?;
     for e in &subtree {
         let new_path = format!("{to}{}", &e.path[from.len()..]);
@@ -580,6 +637,7 @@ pub async fn move_entry(
         let rev = next_rev(&mut tx, user.id).await?;
         tombstone(&mut tx, user.id, &e.path, rev).await?;
     }
+    stamp(&mut tx, user.id, since, &user.device_name).await?;
     let moved = get_live(&mut tx, user.id, &to).await?.ok_or(ApiError::NotFound)?;
     tx.commit().await?;
     Ok(Json(moved))

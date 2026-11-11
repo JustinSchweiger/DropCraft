@@ -1,20 +1,22 @@
 //! Freigabe-Links: Ein Ordner (oder eine Datei) wird über eine öffentliche
-//! Webseite /s/<token> lesbar, ohne dass man DropCraft braucht.
+//! Webseite /s/<token> lesbar – optional mit Upload für Gäste, Passwort und
+//! Ablaufdatum. Dazu die Startseite unter „/“.
 
 use std::io::Write;
 
 use axum::{
     body::Body,
-    extract::{Path, Query, State},
+    extract::{Multipart, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
-    response::{Html, IntoResponse, Response},
-    Json,
+    response::{Html, IntoResponse, Redirect, Response},
+    Form, Json,
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{
-    auth::AuthUser,
+    auth::{self, AuthUser},
     db::now_ms,
     error::{ApiError, ApiResult},
     files::{self, Entry},
@@ -31,16 +33,68 @@ CREATE TABLE IF NOT EXISTS shares (
 );
 "#;
 
+const SHARE_COLS: &str = "token, path, created_at, allow_upload, password_hash IS NOT NULL AS has_password, expires_at, notify";
+
 #[derive(Serialize, sqlx::FromRow)]
 pub struct Share {
     pub token: String,
     pub path: String,
     pub created_at: i64,
+    pub allow_upload: bool,
+    pub has_password: bool,
+    pub expires_at: Option<i64>,
+    pub notify: bool,
+}
+
+#[derive(Deserialize, Default)]
+pub struct Settings {
+    allow_upload: Option<bool>,
+    /// Neues Passwort; leerer Text entfernt das Passwort.
+    password: Option<String>,
+    /// Ablauf (Unix-ms); 0 entfernt das Ablaufdatum.
+    expires_at: Option<i64>,
+    notify: Option<bool>,
 }
 
 #[derive(Deserialize)]
 pub struct CreateReq {
     path: String,
+    #[serde(flatten)]
+    settings: Settings,
+}
+
+async fn get_share(state: &AppState, user_id: i64, token: &str) -> ApiResult<Share> {
+    sqlx::query_as(&format!("SELECT {SHARE_COLS} FROM shares WHERE token = ? AND user_id = ?"))
+        .bind(token)
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(ApiError::NotFound)
+}
+
+async fn apply_settings(state: &AppState, token: &str, s: &Settings) -> ApiResult<()> {
+    if let Some(v) = s.allow_upload {
+        sqlx::query("UPDATE shares SET allow_upload = ? WHERE token = ?").bind(v).bind(token).execute(&state.db).await?;
+    }
+    if let Some(v) = s.notify {
+        sqlx::query("UPDATE shares SET notify = ? WHERE token = ?").bind(v).bind(token).execute(&state.db).await?;
+    }
+    if let Some(v) = s.expires_at {
+        let v = (v > 0).then_some(v);
+        sqlx::query("UPDATE shares SET expires_at = ? WHERE token = ?").bind(v).bind(token).execute(&state.db).await?;
+    }
+    if let Some(pw) = &s.password {
+        let hash = if pw.is_empty() {
+            None
+        } else {
+            if pw.len() < 4 {
+                return Err(ApiError::BadRequest("Passwort: mindestens 4 Zeichen".into()));
+            }
+            Some(auth::hash_password(pw)?)
+        };
+        sqlx::query("UPDATE shares SET password_hash = ? WHERE token = ?").bind(hash).bind(token).execute(&state.db).await?;
+    }
+    Ok(())
 }
 
 /// Legt einen Link an (oder gibt den bestehenden für diesen Pfad zurück).
@@ -49,31 +103,45 @@ pub async fn create(State(state): State<AppState>, user: AuthUser, Json(req): Js
     if files::get_live_pool(&state, user.id, &path).await?.is_none() {
         return Err(ApiError::NotFound);
     }
-    if let Some(s) = sqlx::query_as::<_, Share>("SELECT token, path, created_at FROM shares WHERE user_id = ? AND path = ?")
+    let existing: Option<(String,)> = sqlx::query_as("SELECT token FROM shares WHERE user_id = ? AND path = ?")
         .bind(user.id)
         .bind(&path)
         .fetch_optional(&state.db)
-        .await?
-    {
-        return Ok(Json(s));
-    }
-    let mut raw = [0u8; 12];
-    rand::rngs::OsRng.fill_bytes(&mut raw);
-    let token = hex::encode(raw);
-    let created_at = now_ms();
-    sqlx::query("INSERT INTO shares (token, user_id, path, created_at) VALUES (?, ?, ?, ?)")
-        .bind(&token)
-        .bind(user.id)
-        .bind(&path)
-        .bind(created_at)
-        .execute(&state.db)
         .await?;
-    Ok(Json(Share { token, path, created_at }))
+    let token = match existing {
+        Some((t,)) => t,
+        None => {
+            let mut raw = [0u8; 12];
+            rand::rngs::OsRng.fill_bytes(&mut raw);
+            let token = hex::encode(raw);
+            sqlx::query("INSERT INTO shares (token, user_id, path, created_at) VALUES (?, ?, ?, ?)")
+                .bind(&token)
+                .bind(user.id)
+                .bind(&path)
+                .bind(now_ms())
+                .execute(&state.db)
+                .await?;
+            token
+        }
+    };
+    apply_settings(&state, &token, &req.settings).await?;
+    Ok(Json(get_share(&state, user.id, &token).await?))
+}
+
+pub async fn update(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(token): Path<String>,
+    Json(req): Json<Settings>,
+) -> ApiResult<Json<Share>> {
+    get_share(&state, user.id, &token).await?;
+    apply_settings(&state, &token, &req).await?;
+    Ok(Json(get_share(&state, user.id, &token).await?))
 }
 
 pub async fn list(State(state): State<AppState>, user: AuthUser) -> ApiResult<Json<Vec<Share>>> {
     Ok(Json(
-        sqlx::query_as("SELECT token, path, created_at FROM shares WHERE user_id = ? ORDER BY created_at DESC")
+        sqlx::query_as(&format!("SELECT {SHARE_COLS} FROM shares WHERE user_id = ? ORDER BY created_at DESC"))
             .bind(user.id)
             .fetch_all(&state.db)
             .await?,
@@ -100,35 +168,184 @@ pub struct PubQuery {
     p: String,
     #[serde(default)]
     inline: Option<u8>,
+    #[serde(default)]
+    ok: Option<usize>,
 }
 
 struct Resolved {
     user_id: i64,
+    token: String,
     /// Freigegebener Pfad (Wurzel der Freigabe)
     root: String,
     /// Pfad relativ zur Freigabe
     rel: String,
     entry: Entry,
+    allow_upload: bool,
 }
 
-async fn resolve(state: &AppState, token: &str, rel: &str) -> Result<Resolved, Response> {
-    let row: Option<(i64, String)> = sqlx::query_as("SELECT user_id, path FROM shares WHERE token = ?")
+fn cookie_name(token: &str) -> String {
+    format!("dcs_{token}")
+}
+
+fn cookie_value(secret: &str, token: &str, pw_hash: &str) -> String {
+    hex::encode(Sha256::digest(format!("{secret}:{token}:{pw_hash}").as_bytes()))
+}
+
+fn has_cookie(headers: &HeaderMap, name: &str, value: &str) -> bool {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .filter_map(|kv| kv.trim().split_once('='))
+        .any(|(k, v)| k == name && v == value)
+}
+
+async fn resolve(state: &AppState, token: &str, rel: &str, headers: &HeaderMap) -> Result<Resolved, Response> {
+    type Row = (i64, String, bool, Option<String>, Option<i64>);
+    let row: Option<Row> = sqlx::query_as("SELECT user_id, path, allow_upload, password_hash, expires_at FROM shares WHERE token = ?")
         .bind(token)
         .fetch_optional(&state.db)
         .await
         .map_err(|e| ApiError::from(e).into_response())?;
-    let Some((user_id, root)) = row else { return Err(not_found_page()) };
+    let Some((user_id, root, allow_upload, pw_hash, expires_at)) = row else { return Err(not_found_page()) };
+    if expires_at.map(|t| t < now_ms()).unwrap_or(false) {
+        return Err(message_page(StatusCode::GONE, "Link abgelaufen", "Diese Freigabe ist nicht mehr gültig."));
+    }
+    if let Some(h) = &pw_hash {
+        if !has_cookie(headers, &cookie_name(token), &cookie_value(&state.secret, token, h)) {
+            return Err(password_page(token, false));
+        }
+    }
     let rel = paths::normalize(rel).map_err(|_| not_found_page())?;
     let full = if rel.is_empty() { root.clone() } else { format!("{root}/{rel}") };
     let entry = files::get_live_pool(state, user_id, &full)
         .await
         .map_err(|e| e.into_response())?
         .ok_or_else(not_found_page)?;
-    Ok(Resolved { user_id, root, rel, entry })
+    Ok(Resolved { user_id, token: token.to_string(), root, rel, entry, allow_upload })
 }
 
-pub async fn page(State(state): State<AppState>, Path(token): Path<String>, Query(q): Query<PubQuery>) -> Response {
-    let r = match resolve(&state, &token, &q.p).await {
+#[derive(Deserialize)]
+pub struct AuthForm {
+    password: String,
+}
+
+/// Passwort-Eingabe für geschützte Links: setzt ein Cookie für 30 Tage.
+pub async fn auth(State(state): State<AppState>, Path(token): Path<String>, Form(f): Form<AuthForm>) -> Response {
+    let row: Option<(Option<String>,)> = sqlx::query_as("SELECT password_hash FROM shares WHERE token = ?")
+        .bind(&token)
+        .fetch_optional(&state.db)
+        .await
+        .unwrap_or(None);
+    let Some((Some(hash),)) = row else { return Redirect::to(&format!("/s/{token}")).into_response() };
+    let pw = f.password.clone();
+    let h2 = hash.clone();
+    let ok = tokio::task::spawn_blocking(move || auth::verify_password(&pw, &h2)).await.unwrap_or(false);
+    if !ok {
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        return password_page(&token, true);
+    }
+    let cookie = format!(
+        "{}={}; Path=/s/{token}; Max-Age=2592000; HttpOnly; SameSite=Lax; Secure",
+        cookie_name(&token),
+        cookie_value(&state.secret, &token, &hash)
+    );
+    let mut resp = Redirect::to(&format!("/s/{token}")).into_response();
+    if let Ok(v) = HeaderValue::from_str(&cookie) {
+        resp.headers_mut().insert(header::SET_COOKIE, v);
+    }
+    resp
+}
+
+/// Upload durch Gäste (nur wenn für den Link erlaubt).
+pub async fn upload(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+    Query(q): Query<PubQuery>,
+    headers: HeaderMap,
+    mut mp: Multipart,
+) -> Response {
+    let r = match resolve(&state, &token, &q.p, &headers).await {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    if !r.allow_upload || !r.entry.is_dir {
+        return message_page(StatusCode::FORBIDDEN, "Upload nicht erlaubt", "Für diesen Link sind Uploads ausgeschaltet.");
+    }
+    let mut guest = String::new();
+    let mut count = 0usize;
+    loop {
+        let field = match mp.next_field().await {
+            Ok(Some(f)) => f,
+            Ok(None) => break,
+            Err(e) => return message_page(StatusCode::BAD_REQUEST, "Upload abgebrochen", &e.to_string()),
+        };
+        match field.name() {
+            Some("name") => {
+                guest = field.text().await.unwrap_or_default().trim().chars().take(40).collect();
+            }
+            Some("files") => {
+                let Some(fname) = field.file_name().map(|n| n.to_string()) else { continue };
+                // Nur den Dateinamen nehmen, keine Pfade aus dem Browser.
+                let fname = fname.rsplit(['/', '\\']).next().unwrap_or("").trim().to_string();
+                if fname.is_empty() {
+                    continue;
+                }
+                let target = match free_name(&state, r.user_id, &r.entry.path, &fname).await {
+                    Ok(t) => t,
+                    Err(e) => return e.into_response(),
+                };
+                let by = if guest.is_empty() { "Gast (Link)".to_string() } else { format!("Gast: {guest}") };
+                let res = files::store_file(&state, r.user_id, target, Box::pin(field), None, now_ms(), Some(0), &by).await;
+                match res {
+                    Ok(_) => count += 1,
+                    Err(ApiError::QuotaExceeded) => {
+                        return message_page(StatusCode::INSUFFICIENT_STORAGE, "Kein Platz mehr", "Der Speicher für diese Freigabe ist voll.")
+                    }
+                    Err(e) => return e.into_response(),
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut url = format!("/s/{}?ok={count}", r.token);
+    if !r.rel.is_empty() {
+        url.push_str(&format!("&p={}", url_q(&r.rel)));
+    }
+    Redirect::to(&url).into_response()
+}
+
+/// Freier Dateiname im Ordner: "Foto.jpg", sonst "Foto (2).jpg", …
+async fn free_name(state: &AppState, user_id: i64, dir: &str, name: &str) -> ApiResult<String> {
+    let full = |n: &str| paths::normalize_non_root(&format!("{dir}/{n}"));
+    let first = full(name)?;
+    if files::get_live_pool(state, user_id, &first).await?.is_none() {
+        return Ok(first);
+    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], &name[i..]),
+        _ => (name, ""),
+    };
+    for n in 2..1000 {
+        let cand = full(&format!("{stem} ({n}){ext}"))?;
+        if files::get_live_pool(state, user_id, &cand).await?.is_none() {
+            return Ok(cand);
+        }
+    }
+    Err(ApiError::Conflict("Kein freier Dateiname".into()))
+}
+
+fn rel_of(r: &Resolved, name: &str) -> String {
+    if r.rel.is_empty() {
+        name.to_string()
+    } else {
+        format!("{}/{}", r.rel, name)
+    }
+}
+
+pub async fn page(State(state): State<AppState>, Path(token): Path<String>, Query(q): Query<PubQuery>, headers: HeaderMap) -> Response {
+    let r = match resolve(&state, &token, &q.p, &headers).await {
         Ok(r) => r,
         Err(resp) => return resp,
     };
@@ -148,91 +365,182 @@ pub async fn page(State(state): State<AppState>, Path(token): Path<String>, Quer
 
     let title = if r.rel.is_empty() { root_name.clone() } else { r.rel.rsplit('/').next().unwrap_or("").to_string() };
     let mut body = String::new();
+    if let Some(n) = q.ok {
+        body.push_str(&format!(
+            r#"<p class="notice">{} hochgeladen. Danke!</p>"#,
+            if n == 1 { "1 Datei".to_string() } else { format!("{n} Dateien") }
+        ));
+    }
     if r.entry.is_dir {
-        let full = r.entry.path.clone();
-        let items = match files::children(&state, r.user_id, &full).await {
+        let items = match files::children(&state, r.user_id, &r.entry.path).await {
             Ok(i) => i,
             Err(e) => return e.into_response(),
         };
         let files_count = items.iter().filter(|e| !e.is_dir).count();
         let total: i64 = items.iter().map(|e| e.size).sum();
         body.push_str(&format!(
-            r#"<div class="bar"><span class="meta">{} Ordner · {} Dateien · {}</span><a class="btn primary" href="{base}/zip?p={}">{}Alles als ZIP</a></div>"#,
+            r#"<div class="bar"><span class="meta">{} Ordner · {} Dateien · {}</span><a class="btn primary" href="{base}/zip?p={}">{ICON_DOWNLOAD}Alles als ZIP</a></div>"#,
             items.len() - files_count,
             files_count,
             human(total),
-            url_q(&r.rel),
-            ICON_DOWNLOAD
+            url_q(&r.rel)
         ));
+
+        if r.allow_upload {
+            body.push_str(&format!(
+                r#"<form class="upload" method="post" enctype="multipart/form-data" action="{base}/upload?p={}">
+<div class="up-title">{ICON_UPLOAD}<span>Dateien hinzufügen</span></div>
+<label class="field"><span>Dein Name (optional)</span><input type="text" name="name" maxlength="40" autocomplete="name"></label>
+<label class="field"><span>Dateien</span><input type="file" name="files" multiple required></label>
+<button class="btn primary" type="submit">Hochladen</button></form>"#,
+                url_q(&r.rel)
+            ));
+        }
+
+        // Galerie für Bilder und Videos
+        let media: Vec<&Entry> = items.iter().filter(|e| !e.is_dir && (is_image(name_of(e)) || is_video(name_of(e)))).collect();
+        if !media.is_empty() {
+            body.push_str(r#"<div class="gallery">"#);
+            for e in &media {
+                let name = name_of(e);
+                let rel = url_q(&rel_of(&r, name));
+                let thumb = if is_image(name) {
+                    format!(r#"<img src="{base}/file?p={rel}&amp;inline=1" alt="{}" loading="lazy">"#, esc(name))
+                } else {
+                    format!(
+                        r#"<video src="{base}/file?p={rel}&amp;inline=1#t=0.5" preload="metadata" muted playsinline></video><span class="play">{ICON_PLAY}</span>"#
+                    )
+                };
+                body.push_str(&format!(r#"<a class="tile" href="{base}/view?p={rel}" title="{}">{thumb}</a>"#, esc(name)));
+            }
+            body.push_str("</div>");
+        }
+
         if items.is_empty() {
             body.push_str(r#"<p class="empty">Dieser Ordner ist leer.</p>"#);
         }
         body.push_str(r#"<ul class="list">"#);
         for e in &items {
-            let name = e.path.rsplit('/').next().unwrap_or("");
-            let rel = if r.rel.is_empty() { name.to_string() } else { format!("{}/{}", r.rel, name) };
+            let name = name_of(e);
+            let rel = url_q(&rel_of(&r, name));
             if e.is_dir {
                 body.push_str(&format!(
-                    r#"<li><a class="row" href="{base}?p={}"><span class="ic dir">{ICON_FOLDER}</span><span class="name">{}</span><span class="meta">Ordner</span></a></li>"#,
-                    url_q(&rel),
+                    r#"<li><a class="row" href="{base}?p={rel}"><span class="ic dir">{ICON_FOLDER}</span><span class="name">{}</span><span class="meta">Ordner</span></a></li>"#,
                     esc(name)
                 ));
             } else {
                 let view = if is_viewable(name) {
-                    format!(r#"<a class="btn" href="{base}/file?p={}&amp;inline=1" target="_blank" rel="noopener">Ansehen</a>"#, url_q(&rel))
+                    format!(r#"<a class="btn" href="{base}/view?p={rel}">Ansehen</a>"#)
                 } else {
                     String::new()
                 };
                 body.push_str(&format!(
-                    r#"<li><div class="row"><span class="ic">{}</span><span class="name">{}</span><span class="meta">{} · {}</span>{view}<a class="btn" href="{base}/file?p={}" aria-label="{} herunterladen">{ICON_DOWNLOAD}</a></div></li>"#,
-                    if is_image(name) { ICON_IMAGE } else { ICON_FILE },
+                    r#"<li><div class="row"><span class="ic">{}</span><span class="name">{}</span><span class="meta">{} · {}</span>{view}<a class="btn" href="{base}/file?p={rel}" aria-label="{} herunterladen">{ICON_DOWNLOAD}</a></div></li>"#,
+                    icon_for(name),
                     esc(name),
                     human(e.size),
                     date(e.modified_at),
-                    url_q(&rel),
                     esc(name)
                 ));
             }
         }
         body.push_str("</ul>");
     } else {
-        let name = r.entry.path.rsplit('/').next().unwrap_or("");
+        let name = name_of(&r.entry);
+        let preview = media_html(&base, &url_q(&r.rel), name, "single-media");
         body.push_str(&format!(
-            r#"<div class="single"><span class="ic big">{}</span><div class="name">{}</div><div class="meta">{} · {}</div><div class="actions">{}<a class="btn primary" href="{base}/file?p={}">{ICON_DOWNLOAD}Herunterladen</a></div></div>"#,
-            if is_image(name) { ICON_IMAGE } else { ICON_FILE },
+            r#"<div class="single">{}<div class="name">{}</div><div class="meta">{} · {}</div><div class="actions"><a class="btn primary" href="{base}/file?p={}">{ICON_DOWNLOAD}Herunterladen</a></div></div>"#,
+            if preview.is_empty() { format!(r#"<span class="ic big">{}</span>"#, icon_for(name)) } else { preview },
             esc(name),
             human(r.entry.size),
             date(r.entry.modified_at),
-            if is_viewable(name) {
-                format!(r#"<a class="btn" href="{base}/file?p={}&amp;inline=1" target="_blank" rel="noopener">Ansehen</a>"#, url_q(&r.rel))
-            } else {
-                String::new()
-            },
             url_q(&r.rel)
         ));
     }
+    page_html(&esc(&title), &format!(r#"<nav class="crumbs">{crumbs}</nav><h1>{}</h1>{body}"#, esc(&title)))
+}
 
-    let html = format!(
-        r#"<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="robots" content="noindex"><title>{} · DropCraft</title><style>{CSS}</style></head>
-<body><header><div class="brand">{ICON_CUBE}<span>DROPCRAFT</span></div><span class="tag">Geteilter Ordner</span></header>
-<main><nav class="crumbs">{crumbs}</nav><h1>{}</h1>{body}</main>
-<footer>Geteilt mit DropCraft</footer></body></html>"#,
-        esc(&title),
-        esc(&title)
+/// Vorschau-Seite für ein Bild/Video/Audio mit Vor/Zurück.
+pub async fn view(State(state): State<AppState>, Path(token): Path<String>, Query(q): Query<PubQuery>, headers: HeaderMap) -> Response {
+    let r = match resolve(&state, &token, &q.p, &headers).await {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    if r.entry.is_dir {
+        return Redirect::to(&format!("/s/{token}?p={}", url_q(&r.rel))).into_response();
+    }
+    let base = format!("/s/{token}");
+    let name = name_of(&r.entry).to_string();
+    let parent_rel = r.rel.rsplit_once('/').map(|(p, _)| p.to_string()).unwrap_or_default();
+    let parent_full = r.entry.path.rsplit_once('/').map(|(p, _)| p.to_string()).unwrap_or_default();
+    let siblings: Vec<String> = files::children(&state, r.user_id, &parent_full)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|e| !e.is_dir && is_viewable(name_of(e)))
+        .map(|e| name_of(e).to_string())
+        .collect();
+    let pos = siblings.iter().position(|n| *n == name);
+    let link = |n: &str| {
+        let rel = if parent_rel.is_empty() { n.to_string() } else { format!("{parent_rel}/{n}") };
+        format!("{base}/view?p={}", url_q(&rel))
+    };
+    let prev = pos.and_then(|i| i.checked_sub(1)).map(|i| link(&siblings[i]));
+    let next = pos.and_then(|i| siblings.get(i + 1)).map(|n| link(n));
+    let nav = |href: Option<String>, label: &str| match href {
+        Some(h) => format!(r#"<a class="btn" href="{h}">{label}</a>"#),
+        None => format!(r#"<span class="btn disabled">{label}</span>"#),
+    };
+    let rel = url_q(&r.rel);
+    let back = if parent_rel.is_empty() { base.clone() } else { format!("{base}?p={}", url_q(&parent_rel)) };
+    let media = media_html(&base, &rel, &name, "viewer-media");
+    let media = if media.is_empty() {
+        format!(r#"<a class="btn" href="{base}/file?p={rel}&amp;inline=1" target="_blank" rel="noopener">Im Browser öffnen</a>"#)
+    } else {
+        media
+    };
+    let body = format!(
+        r#"<nav class="crumbs"><a href="{back}">Zurück zum Ordner</a></nav><h1>{}</h1><div class="viewer">{media}</div>
+<div class="viewer-bar">{}<span class="meta">{} · {}{}</span>{}<a class="btn primary" href="{base}/file?p={rel}">{ICON_DOWNLOAD}Herunterladen</a></div>"#,
+        esc(&name),
+        nav(prev, "Zurück"),
+        human(r.entry.size),
+        date(r.entry.modified_at),
+        pos.map(|i| format!(" · {} von {}", i + 1, siblings.len())).unwrap_or_default(),
+        nav(next, "Weiter"),
     );
-    let mut resp = Html(html).into_response();
-    let h = resp.headers_mut();
-    h.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'"),
-    );
-    h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
-    resp
+    page_html(&esc(&name), &body)
+}
+
+fn media_html(base: &str, rel: &str, name: &str, class: &str) -> String {
+    let src = format!("{base}/file?p={rel}&amp;inline=1");
+    if is_image(name) {
+        format!(r#"<img class="{class}" src="{src}" alt="{}">"#, esc(name))
+    } else if is_video(name) {
+        format!(r#"<video class="{class}" src="{src}" controls playsinline preload="metadata"></video>"#)
+    } else if is_audio(name) {
+        format!(r#"<audio class="{class}" src="{src}" controls preload="metadata"></audio>"#)
+    } else {
+        String::new()
+    }
+}
+
+fn name_of(e: &Entry) -> &str {
+    e.path.rsplit('/').next().unwrap_or("")
+}
+
+fn icon_for(name: &str) -> &'static str {
+    if is_image(name) {
+        ICON_IMAGE
+    } else if is_video(name) || is_audio(name) {
+        ICON_MEDIA
+    } else {
+        ICON_FILE
+    }
 }
 
 pub async fn file(State(state): State<AppState>, Path(token): Path<String>, Query(q): Query<PubQuery>, headers: HeaderMap) -> Response {
-    let r = match resolve(&state, &token, &q.p).await {
+    let r = match resolve(&state, &token, &q.p, &headers).await {
         Ok(r) => r,
         Err(resp) => return resp,
     };
@@ -251,9 +559,51 @@ pub async fn file(State(state): State<AppState>, Path(token): Path<String>, Quer
     }
 }
 
+// ------------------------------------------------------------ Startseite
+
+fn app_exe(state: &AppState) -> std::path::PathBuf {
+    state.cfg.data_dir.join("public").join("DropCraft.exe")
+}
+
+pub async fn landing(State(state): State<AppState>) -> Response {
+    let download = match tokio::fs::metadata(app_exe(&state)).await {
+        Ok(m) => format!(
+            r#"<a class="btn primary big" href="/download/windows">{ICON_DOWNLOAD}Windows-App herunterladen</a><span class="meta">DropCraft.exe · {}</span>"#,
+            human(m.len() as i64)
+        ),
+        Err(_) => String::new(),
+    };
+    let body = format!(
+        r#"<section class="hero"><div class="hero-logo">{ICON_CUBE_BIG}</div><h1>DropCraft</h1>
+<p class="lead">Private Cloud zum Synchronisieren und Teilen von Dateien.</p>
+<div class="hero-actions">{download}</div>
+<p class="meta">Du hast einen Link bekommen? Öffne ihn einfach direkt – dafür brauchst du nichts zu installieren.</p></section>"#
+    );
+    page_html("DropCraft", &body)
+}
+
+pub async fn download_app(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let path = app_exe(&state);
+    let Ok(meta) = tokio::fs::metadata(&path).await else { return not_found_page() };
+    let file = match tokio::fs::File::open(&path).await {
+        Ok(f) => f,
+        Err(_) => return not_found_page(),
+    };
+    let _ = headers;
+    (
+        [
+            (header::CONTENT_TYPE, "application/vnd.microsoft.portable-executable".to_string()),
+            (header::CONTENT_DISPOSITION, "attachment; filename=\"DropCraft.exe\"".to_string()),
+            (header::CONTENT_LENGTH, meta.len().to_string()),
+        ],
+        Body::from_stream(tokio_util::io::ReaderStream::new(file)),
+    )
+        .into_response()
+}
+
 /// Ganzer Ordner als ZIP (ohne Kompression, gestreamt).
-pub async fn zip(State(state): State<AppState>, Path(token): Path<String>, Query(q): Query<PubQuery>) -> Response {
-    let r = match resolve(&state, &token, &q.p).await {
+pub async fn zip(State(state): State<AppState>, Path(token): Path<String>, Query(q): Query<PubQuery>, headers: HeaderMap) -> Response {
+    let r = match resolve(&state, &token, &q.p, &headers).await {
         Ok(r) => r,
         Err(resp) => return resp,
     };
@@ -335,11 +685,48 @@ impl Drop for ChannelWriter {
 // ------------------------------------------------------------ Hilfen
 
 fn not_found_page() -> Response {
-    let html = format!(
-        r#"<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Nicht gefunden · DropCraft</title><style>{CSS}</style></head>
-<body><header><div class="brand">{ICON_CUBE}<span>DROPCRAFT</span></div></header><main><h1>Link nicht gefunden</h1><p class="empty">Diese Freigabe gibt es nicht mehr oder der Link ist falsch.</p></main></body></html>"#
+    message_page(StatusCode::NOT_FOUND, "Link nicht gefunden", "Diese Freigabe gibt es nicht mehr oder der Link ist falsch.")
+}
+
+fn message_page(status: StatusCode, title: &str, text: &str) -> Response {
+    let mut r = page_html(&esc(title), &format!(r#"<h1>{}</h1><p class="empty">{}</p>"#, esc(title), esc(text)));
+    *r.status_mut() = status;
+    r
+}
+
+fn password_page(token: &str, wrong: bool) -> Response {
+    let hint = if wrong { r#"<p class="error">Falsches Passwort.</p>"# } else { "" };
+    let mut r = page_html(
+        "Passwort erforderlich",
+        &format!(
+            r#"<section class="hero"><div class="hero-logo">{ICON_LOCK}</div><h1>Passwort erforderlich</h1>{hint}
+<form class="pw" method="post" action="/s/{}/auth"><label class="field"><span>Passwort</span><input type="password" name="password" autofocus required></label>
+<button class="btn primary" type="submit">Öffnen</button></form></section>"#,
+            esc(token)
+        ),
     );
-    (StatusCode::NOT_FOUND, Html(html)).into_response()
+    *r.status_mut() = StatusCode::UNAUTHORIZED;
+    r
+}
+
+fn page_html(title: &str, main: &str) -> Response {
+    let html = format!(
+        r#"<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex"><title>{title} · DropCraft</title><style>{CSS}</style></head>
+<body><header><a class="brand" href="/">{ICON_CUBE}<span>DROPCRAFT</span></a></header>
+<main>{main}</main><footer>DropCraft</footer></body></html>"#
+    );
+    let mut resp = Html(html).into_response();
+    let h = resp.headers_mut();
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; media-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+        ),
+    );
+    h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    resp
 }
 
 fn esc(s: &str) -> String {
@@ -396,8 +783,16 @@ fn is_image(name: &str) -> bool {
     matches!(ext(name).as_str(), "jpg" | "jpeg" | "png" | "gif" | "webp")
 }
 
+fn is_video(name: &str) -> bool {
+    matches!(ext(name).as_str(), "mp4" | "webm" | "mov" | "m4v")
+}
+
+fn is_audio(name: &str) -> bool {
+    matches!(ext(name).as_str(), "mp3" | "wav" | "ogg" | "m4a" | "flac")
+}
+
 fn is_viewable(name: &str) -> bool {
-    is_image(name) || matches!(ext(name).as_str(), "pdf" | "txt" | "mp4" | "webm" | "mp3" | "wav" | "ogg")
+    is_image(name) || is_video(name) || is_audio(name) || matches!(ext(name).as_str(), "pdf" | "txt")
 }
 
 const ICON_CUBE: &str = r##"<svg width="22" height="22" viewBox="0 0 20 20" fill="none" stroke="#19e3f0" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M10 2.5l6.5 3.75v7.5L10 17.5l-6.5-3.75v-7.5z"/><path d="M3.5 6.25L10 10l6.5-3.75M10 10v7.5"/></svg>"##;
@@ -406,11 +801,16 @@ const ICON_FILE: &str = r##"<svg width="20" height="20" viewBox="0 0 16 16" fill
 const ICON_IMAGE: &str = r##"<svg width="20" height="20" viewBox="0 0 16 16" fill="none" stroke="#a084ff" stroke-width="1.2" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1"/><circle cx="6" cy="6.5" r="1"/><path d="M2.5 12l3.5-3.5 2.5 2.5 2-2 3 3"/></svg>"##;
 const ICON_DOWNLOAD: &str = r##"<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5v8M5 7.5l3 3 3-3"/><path d="M2.5 10.5v3h11v-3"/></svg>"##;
 
+const ICON_UPLOAD: &str = r##"<svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="#19e3f0" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 10.5V2.5M5 5.5l3-3 3 3"/><path d="M2.5 10.5v3h11v-3"/></svg>"##;
+const ICON_PLAY: &str = r##"<svg width="28" height="28" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="7.5" fill="rgba(11,14,18,.7)"/><path d="M6.5 5v6l5-3z" fill="#e6ecf2"/></svg>"##;
+const ICON_MEDIA: &str = r##"<svg width="20" height="20" viewBox="0 0 16 16" fill="none" stroke="#f45db8" stroke-width="1.2" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1"/><path d="M6.5 6v4l3.5-2z"/></svg>"##;
+const ICON_LOCK: &str = r##"<svg width="44" height="44" viewBox="0 0 16 16" fill="none" stroke="#19e3f0" stroke-width="1.1" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="10" height="7" rx="1"/><path d="M5 7V5a3 3 0 0 1 6 0v2"/></svg>"##;
+const ICON_CUBE_BIG: &str = r##"<svg width="64" height="64" viewBox="0 0 20 20" fill="none" stroke="#19e3f0" stroke-width="1.1" stroke-linejoin="round" aria-hidden="true"><path d="M10 2.5l6.5 3.75v7.5L10 17.5l-6.5-3.75v-7.5z"/><path d="M3.5 6.25L10 10l6.5-3.75M10 10v7.5"/></svg>"##;
 const CSS: &str = r#"
 *{box-sizing:border-box}
 body{margin:0;background:#0b0e12;color:#e6ecf2;font:15px/1.45 "Segoe UI",Ubuntu,system-ui,sans-serif}
 header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 20px;border-bottom:1px solid #28303a;background:#0b0e12}
-.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:12px;letter-spacing:.06em}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:12px;letter-spacing:.06em;color:#e6ecf2;text-decoration:none}
 .tag{color:#95a2b0;font-size:13px}
 main{max-width:880px;margin:0 auto;padding:24px 16px 48px}
 h1{font-weight:400;font-size:26px;margin:4px 0 16px;overflow-wrap:anywhere}
@@ -435,6 +835,32 @@ a.row:hover{background:#1a2028}
 .actions{display:flex;gap:8px;margin-top:8px}
 .empty{color:#95a2b0}
 footer{text-align:center;color:#55606c;font-size:12px;padding:16px}
+.notice{background:#0c5c64;border:1px solid #19e3f0;border-radius:4px;padding:10px 12px}
+.error{color:#ef4455}
+.upload{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;align-items:end;margin:0 0 16px;padding:14px;border:1px dashed #28303a;border-radius:8px;background:#12161c}
+.up-title{grid-column:1/-1;display:flex;align-items:center;gap:8px;font-weight:600}
+.field{display:flex;flex-direction:column;gap:6px;font-size:13px;color:#95a2b0}
+.field input{height:36px;padding:0 10px;border:1px solid #28303a;border-radius:4px;background:#0b0e12;color:#e6ecf2;font:inherit}
+.field input[type=file]{padding:6px}
+.upload button{grid-column:1/-1;justify-self:start}
+.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;margin:0 0 16px}
+.tile{position:relative;display:block;aspect-ratio:1;border-radius:6px;overflow:hidden;background:#1a2028;border:1px solid #28303a}
+.tile img,.tile video{width:100%;height:100%;object-fit:cover;display:block}
+.tile:hover{border-color:#19e3f0}
+.play{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
+.viewer{display:flex;justify-content:center;align-items:center;background:#000;border:1px solid #28303a;border-radius:8px;min-height:240px;overflow:hidden}
+.viewer-media{max-width:100%;max-height:72vh;display:block}
+audio.viewer-media{width:100%;margin:40px 16px}
+.viewer-bar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;margin-top:12px}
+.btn.disabled{opacity:.35;pointer-events:none}
+.single-media{max-width:100%;max-height:60vh;border-radius:6px}
+.hero{display:flex;flex-direction:column;align-items:center;text-align:center;gap:12px;padding:56px 0}
+.hero h1{font-size:36px;margin:0}
+.lead{font-size:18px;color:#95a2b0;margin:0}
+.hero-actions{display:flex;flex-direction:column;align-items:center;gap:8px;margin:16px 0}
+.btn.big{height:48px;padding:0 20px;font-size:13px}
+.pw{display:flex;flex-direction:column;gap:12px;width:100%;max-width:320px;text-align:left}
+@media (max-width:560px){.upload{grid-template-columns:1fr}}
 @media (max-width:560px){.row .meta{display:none}h1{font-size:22px}}
 "#;
 

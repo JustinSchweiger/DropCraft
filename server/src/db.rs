@@ -59,7 +59,36 @@ pub async fn connect(data_dir: &Path) -> anyhow::Result<SqlitePool> {
         .await?;
     sqlx::raw_sql(SCHEMA).execute(&pool).await?;
     sqlx::raw_sql(crate::shares::SCHEMA).execute(&pool).await?;
+    // Spätere Erweiterungen bestehender Datenbanken
+    add_column(&pool, "files", "modified_by", "TEXT").await?;
+    add_column(&pool, "shares", "allow_upload", "INTEGER NOT NULL DEFAULT 0").await?;
+    add_column(&pool, "shares", "password_hash", "TEXT").await?;
+    add_column(&pool, "shares", "expires_at", "INTEGER").await?;
+    add_column(&pool, "shares", "notify", "INTEGER NOT NULL DEFAULT 1").await?;
+    sqlx::raw_sql("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        .execute(&pool)
+        .await?;
     Ok(pool)
+}
+
+async fn add_column(pool: &SqlitePool, table: &str, col: &str, decl: &str) -> anyhow::Result<()> {
+    let cols: Vec<(String,)> = sqlx::query_as(&format!("SELECT name FROM pragma_table_info('{table}')")).fetch_all(pool).await?;
+    if !cols.iter().any(|(n,)| n == col) {
+        sqlx::raw_sql(&format!("ALTER TABLE {table} ADD COLUMN {col} {decl}")).execute(pool).await?;
+    }
+    Ok(())
+}
+
+/// Zufälliges Server-Geheimnis (für Cookies von passwortgeschützten Links).
+pub async fn secret(pool: &SqlitePool) -> anyhow::Result<String> {
+    if let Some((v,)) = sqlx::query_as::<_, (String,)>("SELECT value FROM meta WHERE key = 'secret'").fetch_optional(pool).await? {
+        return Ok(v);
+    }
+    let mut raw = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut raw);
+    let v = hex::encode(raw);
+    sqlx::query("INSERT OR IGNORE INTO meta (key, value) VALUES ('secret', ?)").bind(&v).execute(pool).await?;
+    Ok(v)
 }
 
 pub fn now_ms() -> i64 {

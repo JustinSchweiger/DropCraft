@@ -45,6 +45,8 @@ pub struct AppState {
     pub db: SqlitePool,
     pub cfg: Arc<Config>,
     pub dummy_hash: Arc<String>,
+    /// Geheimnis für Cookies passwortgeschützter Links.
+    pub secret: Arc<String>,
 }
 
 impl AppState {
@@ -77,11 +79,16 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/users", get(admin::list_users).post(admin::create_user))
         .route("/admin/users/{id}", patch(admin::update_user).delete(admin::delete_user))
         .route("/shares", get(shares::list).post(shares::create))
-        .route("/shares/{token}", delete(shares::delete));
+        .route("/shares/{token}", delete(shares::delete).patch(shares::update));
     let public = Router::new()
+        .route("/", get(shares::landing))
+        .route("/download/windows", get(shares::download_app))
         .route("/s/{token}", get(shares::page))
+        .route("/s/{token}/view", get(shares::view))
         .route("/s/{token}/file", get(shares::file))
-        .route("/s/{token}/zip", get(shares::zip));
+        .route("/s/{token}/zip", get(shares::zip))
+        .route("/s/{token}/auth", post(shares::auth))
+        .route("/s/{token}/upload", post(shares::upload).layer(DefaultBodyLimit::disable()));
     Router::new()
         .nest("/api", api)
         .merge(public)
@@ -99,7 +106,8 @@ async fn build_state(cfg: Config, clean_tmp: bool) -> anyhow::Result<AppState> {
     tokio::fs::create_dir_all(&tmp).await?;
     let db = db::connect(&cfg.data_dir).await?;
     let dummy_hash = auth::hash_password("dummy-password-for-timing")?;
-    Ok(AppState { db, cfg: Arc::new(cfg), dummy_hash: Arc::new(dummy_hash) })
+    let secret = db::secret(&db).await?;
+    Ok(AppState { db, cfg: Arc::new(cfg), dummy_hash: Arc::new(dummy_hash), secret: Arc::new(secret) })
 }
 
 /// `dropcraft-server adduser <name> <quota_gb> [--admin]`

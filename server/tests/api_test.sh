@@ -89,6 +89,36 @@ check "Ausbruch kodiert verhindert" "$(code "$S/file?p=..%2FPrivat%2Fgeheim.txt"
 check "falscher Token" "$(code http://127.0.0.1:18080/s/abc)" 404
 curl -s -o /tmp/t.zip "$S/zip"
 check "ZIP gültig" "$(python3 -c "import zipfile;z=zipfile.ZipFile('/tmp/t.zip');print(sorted(z.namelist()), z.read('Unter/zahlen.txt').decode())")" "['Grüße & <Test>.txt', 'Unter/zahlen.txt'] 0123456789"
+# Gast-Upload, Einstellungen, Passwort, Ablauf, Vorschau
+check "Upload standardmäßig aus" "$(code -F "files=@/tmp/r.txt" "$S/upload")" 403
+check "Einstellungen ändern" "$(J "${A[@]}" -X PATCH $B/shares/$TOK -d '{"allow_upload":true,"notify":true}' | jq -c '[.allow_upload,.notify,.has_password]')" '[true,true,false]'
+check "Seite zeigt Upload-Formular" "$(curl -s $S | grep -c 'enctype="multipart/form-data"')" 1
+echo "vom gast" > /tmp/gast.txt
+check "Gast-Upload leitet zurück" "$(code -F "name=Anna" -F "files=@/tmp/gast.txt;filename=Grüße & <Test>.txt" "$S/upload")" 303
+check "Name-Konflikt -> neue Datei" "$(curl -s "${A[@]}" "$B/files/download?path=Teilen/Grüße%20%26%20%3CTest%3E%20(2).txt")" "vom gast"
+check "Original unverändert" "$(curl -s "${A[@]}" "$B/files/download?path=Teilen/Grüße%20%26%20%3CTest%3E.txt")" "Hallo Welt"
+check "Urheber im Feed" "$(curl -s "${A[@]}" "$B/sync/changes?cursor=0" | jq -r '.entries[] | select(.path=="Teilen/Grüße & <Test> (2).txt") | .modified_by')" "Gast: Anna"
+check "Urheber der App" "$(curl -s "${A[@]}" "$B/sync/changes?cursor=0" | jq -r '.entries[] | select(.path=="r.txt") | .modified_by')" "test"
+check "Upload in Unterordner" "$(code -F "files=@/tmp/gast.txt;filename=neu.txt" "$S/upload?p=Unter")" 303
+check "landet im Unterordner" "$(curl -s "${A[@]}" "$B/files/download?path=Teilen/Unter/neu.txt")" "vom gast"
+check "Pfad im Dateinamen entschärft" "$(code -F "files=@/tmp/gast.txt;filename=../../Privat/x.txt" "$S/upload")" 303
+check "kein Ausbruch per Dateiname" "$(code "${A[@]}" "$B/files/download?path=Privat/x.txt")" 404
+check "Vorschau-Seite" "$(code "$S/view?p=Unter/zahlen.txt")" 200
+check "Passwort setzen" "$(J "${A[@]}" -X PATCH $B/shares/$TOK -d '{"password":"geheim42"}' | jq .has_password)" true
+check "ohne Passwort gesperrt" "$(code $S)" 401
+check "Datei ohne Passwort gesperrt" "$(code "$S/file?p=Unter/zahlen.txt")" 401
+check "falsches Passwort" "$(code -d password=falsch "$S/auth")" 401
+COOKIE=$(curl -s -o /dev/null -D - -d password=geheim42 "$S/auth" | grep -i '^set-cookie' | sed 's/^[^:]*: //; s/;.*//' | tr -d '\r')
+check "richtiges Passwort -> Cookie" "${COOKIE:0:4}" "dcs_"
+check "mit Cookie offen" "$(code -H "Cookie: $COOKIE" $S)" 200
+check "Passwort entfernen" "$(J "${A[@]}" -X PATCH $B/shares/$TOK -d '{"password":""}' | jq .has_password)" false
+check "wieder offen" "$(code $S)" 200
+check "Ablauf in Vergangenheit" "$(J "${A[@]}" -X PATCH $B/shares/$TOK -d '{"expires_at":1000}' | jq .expires_at)" 1000
+check "abgelaufen" "$(code $S)" 410
+check "Ablauf entfernen" "$(J "${A[@]}" -X PATCH $B/shares/$TOK -d '{"expires_at":0}' | jq .expires_at)" null
+check "Startseite" "$(curl -s http://127.0.0.1:18080/ | grep -c 'Private Cloud')" 1
+check "kein App-Download ohne Datei" "$(code http://127.0.0.1:18080/download/windows)" 404
+
 check "Anna kann Justins Freigabe nicht löschen" "$(code "${Bh[@]}" -X DELETE $B/shares/$TOK)" 404
 check "Liste" "$(curl -s "${A[@]}" $B/shares | jq length)" 1
 check "Freigabe löschen" "$(code "${A[@]}" -X DELETE $B/shares/$TOK)" 200

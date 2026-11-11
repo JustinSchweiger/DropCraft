@@ -1,0 +1,59 @@
+name: Deploy
+
+# Nach erfolgreicher CI auf main: Server aktualisieren und die Windows-App
+# als Download auf der Startseite (https://<domain>/) bereitstellen.
+# Benötigt die Repository-Secrets DEPLOY_HOST und DEPLOY_SSH_KEY.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+    steps:
+      - name: Secrets vorhanden?
+        if: env.DEPLOY_HOST == ''
+        run: |
+          echo "::warning::DEPLOY_HOST/DEPLOY_SSH_KEY fehlen – Deploy übersprungen. Siehe README."
+      - uses: actions/checkout@v4
+        if: env.DEPLOY_HOST != ''
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - name: Windows-App aus der CI holen
+        if: env.DEPLOY_HOST != '' && github.event_name == 'workflow_run'
+        uses: actions/download-artifact@v4
+        with:
+          name: DropCraft-standard
+          path: dist
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: SSH einrichten
+        if: env.DEPLOY_HOST != ''
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy
+          chmod 600 ~/.ssh/deploy
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+      - name: Hochladen und Server aktualisieren
+        if: env.DEPLOY_HOST != ''
+        run: |
+          git archive --format=zip --prefix=dropcraft/ -o dropcraft.zip HEAD
+          cp deploy/server-update.sh dropcraft-update.sh
+          SSH="ssh -i ~/.ssh/deploy root@$DEPLOY_HOST"
+          scp -i ~/.ssh/deploy dropcraft.zip dropcraft-update.sh "root@$DEPLOY_HOST:/opt/"
+          $SSH "bash /opt/dropcraft-update.sh"
+          if [ -f dist/DropCraft.exe ]; then
+            $SSH "mkdir -p /opt/dropcraft/deploy/data/public"
+            scp -i ~/.ssh/deploy dist/DropCraft.exe "root@$DEPLOY_HOST:/opt/dropcraft/deploy/data/public/DropCraft.exe.neu"
+            $SSH "cd /opt/dropcraft/deploy/data/public && mv DropCraft.exe.neu DropCraft.exe && chmod 644 DropCraft.exe && chown -R 10001:10001 ."
+          fi

@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use dropcraft_core::{sync::human_size, Api, ApiError, EventKind, Progress, Share, UserInfo};
+use dropcraft_core::{sync::human_size, Api, ApiError, BandwidthRef, EventKind, Progress, Share, ShareSettings, UserInfo};
 use egui::{Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 
 use crate::{
@@ -31,10 +31,10 @@ struct AccountRt {
 }
 
 impl AccountRt {
-    fn start(acc: Account, ctx: &egui::Context) -> Self {
+    fn start(acc: Account, ctx: &egui::Context, bw: &BandwidthRef) -> Self {
         let shared: SharedRef = Arc::new(Mutex::new(Shared::default()));
-        let cmd = acc.token.as_ref().map(|_| worker::spawn(acc.clone(), shared.clone(), ctx.clone()));
         let paused = Arc::new(AtomicBool::new(acc.paused));
+        let cmd = acc.token.as_ref().map(|_| worker::spawn(acc.clone(), shared.clone(), ctx.clone(), paused.clone(), bw.clone()));
         Self { acc, shared, cmd, paused, speed: SpeedMeter::default() }
     }
 
@@ -52,7 +52,7 @@ impl AccountRt {
 
 /// Für das Taskleisten-Symbol: Zustand aller Konten, alle pausieren/fortsetzen.
 #[derive(Clone, Default)]
-struct Controls(Arc<Mutex<Vec<Ctl>>>);
+struct Controls(Arc<Mutex<Vec<Ctl>>>, Arc<Mutex<SpeedMeter>>);
 
 struct Ctl {
     tx: Sender<Cmd>,
@@ -97,6 +97,7 @@ impl Controls {
         let multi = list.len() > 1;
         let mut files = 0usize;
         let mut bytes = 0u64;
+        let mut transferred = 0u64;
         let mut problem: Option<String> = None;
         let mut all_paused = !list.is_empty();
         for c in list.iter() {
@@ -107,6 +108,7 @@ impl Controls {
                 let p = p.lock().unwrap();
                 files += p.remaining_files();
                 bytes += p.remaining_bytes();
+                transferred += p.bytes_total();
             }
             if !paused && problem.is_none() {
                 problem = match &sh.phase {
@@ -124,14 +126,16 @@ impl Controls {
             (false, true) => "Pausieren",
             (false, false) => "Fortsetzen",
         };
+        let speed = self.1.lock().unwrap().update(transferred);
         let (state, tooltip) = if files > 0 {
-            (
-                tray::TrayState::Syncing,
-                format!("DropCraft – synchronisiere {files} {} · {}", if files == 1 { "Datei" } else { "Dateien" }, human_size(bytes as i64)),
-            )
+            let mut t = format!("DropCraft – {files} {} · {}", if files == 1 { "Datei" } else { "Dateien" }, human_size(bytes as i64));
+            if speed > 1.0 {
+                t.push_str(&format!("\n{}/s · {}", human_size(speed as i64), eta(bytes as f64 / speed)));
+            }
+            (tray::TrayState::Syncing, t)
         } else if let Some(p) = problem {
             (tray::TrayState::Problem, format!("DropCraft – {p}"))
-        } else if all_paused {
+        } else if all_paused && !list.is_empty() {
             (tray::TrayState::Paused, "DropCraft – pausiert".to_string())
         } else {
             (tray::TrayState::Idle, "DropCraft – alles synchronisiert".to_string())
@@ -241,8 +245,14 @@ struct AdminView {
 enum SharesMsg {
     List(Vec<Share>),
     Created(String),
+    Updated(String),
     Deleted,
     Failed(String),
+}
+
+struct SettingsForm {
+    up: String,
+    down: String,
 }
 
 struct SharesView {
@@ -252,6 +262,8 @@ struct SharesView {
     info: Option<(bool, String)>,
     last_link: Option<String>,
     confirm_delete: Option<String>,
+    /// Passwort-Eingabe für die Freigabe mit diesem Token
+    pw_edit: Option<(String, String)>,
     inbox: Pending<SharesMsg>,
 }
 
@@ -260,12 +272,14 @@ enum Screen {
     Form(AccountForm),
     Admin(AdminView),
     Shares(SharesView),
+    Settings(SettingsForm),
 }
 
 // ================================================================ App
 
 pub struct App {
     cfg: Config,
+    bw: BandwidthRef,
     rts: Vec<AccountRt>,
     selected: usize,
     screen: Screen,
@@ -284,7 +298,9 @@ impl App {
         win.set_from(cc);
 
         let cfg = Config::load();
-        let rts: Vec<AccountRt> = cfg.accounts.iter().map(|a| AccountRt::start(a.clone(), &ctx)).collect();
+        let bw = BandwidthRef::default();
+        cfg.apply_bandwidth(&bw);
+        let rts: Vec<AccountRt> = cfg.accounts.iter().map(|a| AccountRt::start(a.clone(), &ctx, &bw)).collect();
         let controls = Controls::default();
         controls.rebuild(&rts);
 
@@ -321,6 +337,7 @@ impl App {
 
         Self {
             cfg,
+            bw,
             rts,
             selected: 0,
             screen,
@@ -392,6 +409,7 @@ impl App {
             info: None,
             last_link: None,
             confirm_delete: None,
+            pw_edit: None,
             inbox: Arc::new(Mutex::new(None)),
         };
         shares_reload(&mut view, &rt.acc, ctx);
@@ -445,6 +463,10 @@ impl App {
                         let copied = copy_to_clipboard(&url);
                         view.info = Some((true, if copied { "Link erstellt und kopiert".into() } else { "Link erstellt".into() }));
                         view.last_link = Some(url);
+                        shares_reload(view, &acc, &ctx);
+                    }
+                    SharesMsg::Updated(m) => {
+                        view.info = Some((true, m));
                         shares_reload(view, &acc, &ctx);
                     }
                     SharesMsg::Deleted => {
@@ -511,6 +533,75 @@ impl App {
                             let name = sh.path.rsplit('/').next().unwrap_or(&sh.path);
                             ui.add(egui::Label::new(RichText::new(name).color(TEXT).strong()).truncate()).on_hover_text(&sh.path);
                             ui.add(egui::Label::new(RichText::new(&sh.path).size(11.0).color(TEXT_DIM)).truncate());
+                            // Einstellungen der Freigabe
+                            ui.add_space(4.0);
+                            ui.horizontal_wrapped(|ui| {
+                                let mut up = sh.allow_upload;
+                                if toggle(ui, &mut up).changed() {
+                                    let t = sh.token.clone();
+                                    shares_update(view, &acc, &ctx, t, ShareSettings { allow_upload: Some(up), ..Default::default() });
+                                }
+                                ui.label("Gäste dürfen hochladen");
+                            });
+                            ui.horizontal_wrapped(|ui| {
+                                let mut n = sh.notify;
+                                if toggle(ui, &mut n).changed() {
+                                    let t = sh.token.clone();
+                                    shares_update(view, &acc, &ctx, t, ShareSettings { notify: Some(n), ..Default::default() });
+                                }
+                                ui.label("Bei Änderungen benachrichtigen");
+                            });
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(RichText::new("Gültig").color(TEXT_DIM));
+                                let current = match sh.expires_at {
+                                    Some(t) => chrono::DateTime::from_timestamp_millis(t)
+                                        .map(|d| format!("bis {}", d.with_timezone(&chrono::Local).format("%d.%m.%Y")))
+                                        .unwrap_or_default(),
+                                    None => "unbegrenzt".into(),
+                                };
+                                let mut choice: Option<i64> = None;
+                                egui::ComboBox::from_id_salt(("exp", &sh.token)).selected_text(current).show_ui(ui, |ui| {
+                                    for (label, days) in [("unbegrenzt", 0i64), ("1 Tag", 1), ("7 Tage", 7), ("30 Tage", 30), ("90 Tage", 90)] {
+                                        if ui.selectable_label(false, label).clicked() {
+                                            choice = Some(days);
+                                        }
+                                    }
+                                });
+                                if let Some(days) = choice {
+                                    let at = if days == 0 { 0 } else { chrono::Utc::now().timestamp_millis() + days * 86_400_000 };
+                                    let t = sh.token.clone();
+                                    shares_update(view, &acc, &ctx, t, ShareSettings { expires_at: Some(at), ..Default::default() });
+                                }
+                            });
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(RichText::new(if sh.has_password { "Passwort: aktiv" } else { "Passwort: keins" }).color(TEXT_DIM));
+                                let editing = view.pw_edit.as_ref().map(|(t, _)| t == &sh.token).unwrap_or(false);
+                                if !editing {
+                                    if ui.small_button(if sh.has_password { "Ändern" } else { "Festlegen" }).clicked() {
+                                        view.pw_edit = Some((sh.token.clone(), String::new()));
+                                    }
+                                    if sh.has_password && ui.small_button("Entfernen").clicked() {
+                                        let t = sh.token.clone();
+                                        shares_update(view, &acc, &ctx, t, ShareSettings { password: Some(String::new()), ..Default::default() });
+                                    }
+                                }
+                            });
+                            let mut save_pw: Option<(String, String)> = None;
+                            if let Some((t, pw)) = view.pw_edit.as_mut() {
+                                if t == &sh.token {
+                                    ui.horizontal(|ui| {
+                                        ui.add(egui::TextEdit::singleline(pw).password(true).hint_text("mind. 4 Zeichen").desired_width(150.0));
+                                        if ui.add_enabled(pw.len() >= 4, egui::Button::new("Speichern")).clicked() {
+                                            save_pw = Some((t.clone(), pw.clone()));
+                                        }
+                                    });
+                                }
+                            }
+                            if let Some((t, pw)) = save_pw {
+                                view.pw_edit = None;
+                                shares_update(view, &acc, &ctx, t, ShareSettings { password: Some(pw), ..Default::default() });
+                            }
+                            ui.add_space(4.0);
                             ui.horizontal(|ui| {
                                 if ui.small_button("Link kopieren").clicked() {
                                     if copy_to_clipboard(&url) {
@@ -554,6 +645,61 @@ impl App {
         }
     }
 
+    // ------------------------------------------------------------ Einstellungen
+
+    fn settings_ui(&mut self, ui: &mut egui::Ui) {
+        let Screen::Settings(form) = &mut self.screen else { return };
+        header_band(ui, "EINSTELLUNGEN");
+        let mut save = false;
+        let mut back = false;
+        egui::Frame::new().inner_margin(16).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(theme::label("Bandbreite"));
+            ui.add_space(4.0);
+            egui::Grid::new("bw").num_columns(3).spacing([10.0, 10.0]).show(ui, |ui| {
+                ui.label(RichText::new("Upload").color(TEXT_DIM));
+                ui.add(egui::TextEdit::singleline(&mut form.up).hint_text("unbegrenzt").desired_width(90.0));
+                ui.label("MB/s");
+                ui.end_row();
+                ui.label(RichText::new("Download").color(TEXT_DIM));
+                ui.add(egui::TextEdit::singleline(&mut form.down).hint_text("unbegrenzt").desired_width(90.0));
+                ui.label("MB/s");
+                ui.end_row();
+            });
+            ui.label(RichText::new("Leer lassen für unbegrenzt. „Pausieren“ hält laufende Übertragungen sofort an.").size(11.0).color(TEXT_DIM));
+            if cfg!(windows) {
+                ui.add_space(14.0);
+                ui.label(theme::label("Start"));
+                ui.horizontal(|ui| {
+                    if toggle(ui, &mut self.cfg.autostart).changed() {
+                        config::set_autostart(self.cfg.autostart);
+                    }
+                    ui.label("Mit Windows starten");
+                });
+            }
+        });
+        footer_band(ui, 48.0, |ui| {
+            if ui.button(theme::button_text("Zurück")).clicked() {
+                back = true;
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(egui::Button::new(theme::button_text("Speichern").color(BG)).fill(ACCENT)).clicked() {
+                    save = true;
+                }
+            });
+        });
+        if save {
+            let parse = |s: &str| s.trim().replace(',', ".").parse::<f64>().ok().filter(|v| *v > 0.0).unwrap_or(0.0);
+            self.cfg.up_limit_mbps = parse(&form.up);
+            self.cfg.down_limit_mbps = parse(&form.down);
+            self.cfg.apply_bandwidth(&self.bw);
+            self.save();
+            self.screen = Screen::Main;
+        } else if back {
+            self.screen = Screen::Main;
+        }
+    }
+
     // ------------------------------------------------------------ Konto-Formular
 
     fn form_ui(&mut self, ui: &mut egui::Ui) {
@@ -580,14 +726,14 @@ impl App {
                     let ctx = ui.ctx().clone();
                     if let Some(i) = self.rts.iter().position(|r| r.acc.id == acc.id) {
                         self.rts[i].stop();
-                        self.rts[i] = AccountRt::start(acc.clone(), &ctx);
+                        self.rts[i] = AccountRt::start(acc.clone(), &ctx, &self.bw);
                         self.cfg.accounts[i] = acc;
                         self.selected = i;
                     } else {
                         if self.cfg.accounts.is_empty() {
                             config::set_autostart(self.cfg.autostart);
                         }
-                        self.rts.push(AccountRt::start(acc.clone(), &ctx));
+                        self.rts.push(AccountRt::start(acc.clone(), &ctx, &self.bw));
                         self.cfg.accounts.push(acc);
                         self.selected = self.rts.len() - 1;
                     }
@@ -963,6 +1109,10 @@ impl App {
                         action = Some("admin");
                         ui.close();
                     }
+                    if ui.button("Einstellungen …").clicked() {
+                        action = Some("settings");
+                        ui.close();
+                    }
                     if ui.button("Konto hinzufügen …").clicked() {
                         action = Some("add");
                         ui.close();
@@ -1010,6 +1160,10 @@ impl App {
                 self.open_shares(i, &ctx);
             }
             Some("add") => self.screen = Screen::Form(AccountForm::new(&self.cfg)),
+            Some("settings") => {
+                let f = |v: f64| if v > 0.0 { fmt_gb(v) } else { String::new() };
+                self.screen = Screen::Settings(SettingsForm { up: f(self.cfg.up_limit_mbps), down: f(self.cfg.down_limit_mbps) });
+            }
             Some("autostart") => {
                 config::set_autostart(self.cfg.autostart);
                 self.save();
@@ -1039,7 +1193,7 @@ impl eframe::App for App {
 
         // Popup: beim Wegklicken oder mit Esc verschwinden (nicht während
         // des Kontoformulars, dort öffnen sich Ordner-Dialoge).
-        if popup_mode && !matches!(self.screen, Screen::Form(_) | Screen::Shares(_)) {
+        if popup_mode && !matches!(self.screen, Screen::Form(_) | Screen::Shares(_) | Screen::Settings(_)) {
             let focused = ctx.input(|i| i.viewport().focused);
             match focused {
                 Some(true) => self.had_focus = true,
@@ -1063,6 +1217,7 @@ impl eframe::App for App {
             Screen::Form(_) => self.form_ui(ui),
             Screen::Admin(_) => self.admin_ui(ui),
             Screen::Shares(_) => self.shares_ui(ui),
+            Screen::Settings(_) => self.settings_ui(ui),
             Screen::Main => self.main_ui(ui),
         });
 
@@ -1224,6 +1379,10 @@ fn shares_create(view: &mut SharesView, acc: &Account, ctx: &egui::Context, remo
         Err(ApiError::NotFound) => Ok(SharesMsg::Failed("Noch nicht auf dem Server – bitte warten, bis es hochgeladen ist.".into())),
         Err(e) => Err(e),
     });
+}
+
+fn shares_update(view: &mut SharesView, acc: &Account, ctx: &egui::Context, token: String, settings: ShareSettings) {
+    shares_spawn(view, acc, ctx, move |api| api.update_share(&token, &settings).map(|_| SharesMsg::Updated("Gespeichert".into())));
 }
 
 fn shares_delete(view: &mut SharesView, acc: &Account, ctx: &egui::Context, token: String) {
@@ -1441,6 +1600,7 @@ fn activity_row(ui: &mut egui::Ui, ev: &dropcraft_core::Event) {
     let (icon, color, verb) = match ev.kind {
         EventKind::Uploaded => (Icon::Up, ACCENT, "Hochgeladen"),
         EventKind::Downloaded => (Icon::Down, OK, "Heruntergeladen"),
+        EventKind::NewOnline => (Icon::Down, TEXT_DIM, "Neu, nur online"),
         EventKind::DeletedLocal => (Icon::Trash, TEXT_DIM, "Hier gelöscht"),
         EventKind::DeletedRemote => (Icon::Trash, TEXT_DIM, "Gelöscht"),
         EventKind::Conflict => (Icon::Warning, WARN, "Konflikt"),
@@ -1448,7 +1608,10 @@ fn activity_row(ui: &mut egui::Ui, ev: &dropcraft_core::Event) {
     };
     let name = ev.path.rsplit('/').next().unwrap_or(&ev.path);
     let when = if ev.at.date_naive() == chrono::Local::now().date_naive() { ev.at.format("%H:%M").to_string() } else { ev.at.format("%d.%m. %H:%M").to_string() };
-    let detail = if ev.detail.is_empty() { format!("{verb} · {when}") } else { format!("{verb} · {} · {when}", ev.detail) };
+    let mut detail = if ev.detail.is_empty() { format!("{verb} · {when}") } else { format!("{verb} · {} · {when}", ev.detail) };
+    if let Some(by) = &ev.by {
+        detail.push_str(&format!(" · von {by}"));
+    }
     ui.horizontal(|ui| {
         ui.set_min_height(44.0);
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());

@@ -40,6 +40,9 @@ pub struct RemoteEntry {
     pub modified_at: i64,
     pub rev: i64,
     pub deleted: bool,
+    /// Gerät oder Gast, das die letzte Änderung gemacht hat.
+    #[serde(default)]
+    pub modified_by: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,6 +77,33 @@ pub struct Share {
     pub token: String,
     pub path: String,
     pub created_at: i64,
+    #[serde(default)]
+    pub allow_upload: bool,
+    #[serde(default)]
+    pub has_password: bool,
+    #[serde(default)]
+    pub expires_at: Option<i64>,
+    #[serde(default = "yes")]
+    pub notify: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// Änderungen an einer Freigabe; `None` = unverändert.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ShareSettings {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_upload: Option<bool>,
+    /// Neues Passwort, "" entfernt es.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// Ablauf in Unix-ms, 0 entfernt ihn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notify: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -181,7 +211,7 @@ impl Api {
     /// Lädt eine Datei hoch. `base_rev`: 0 = darf noch nicht existieren,
     /// sonst die Revision, auf der die lokale Änderung basiert.
     pub fn upload(&self, remote_path: &str, local: &Path, mtime_ms: i64, base_rev: i64) -> ApiResult<RemoteEntry> {
-        self.upload_with_progress(remote_path, local, mtime_ms, base_rev, |_| {})
+        self.upload_with_progress(remote_path, local, mtime_ms, base_rev, |_| Ok(()))
     }
 
     /// Wie `upload`, ruft `on_bytes` für jedes gelesene Stück auf.
@@ -191,7 +221,7 @@ impl Api {
         local: &Path,
         mtime_ms: i64,
         base_rev: i64,
-        on_bytes: impl Fn(u64) + Send + 'static,
+        on_bytes: impl Fn(u64) -> std::io::Result<()> + Send + 'static,
     ) -> ApiResult<RemoteEntry> {
         let file = File::open(local)?;
         let len = file.metadata()?.len();
@@ -208,10 +238,10 @@ impl Api {
 
     /// Lädt eine Datei nach `dest` herunter (überschreibt).
     pub fn download(&self, remote_path: &str, dest: &Path) -> ApiResult<()> {
-        self.download_with_progress(remote_path, dest, &mut |_| {})
+        self.download_with_progress(remote_path, dest, &mut |_| Ok(()))
     }
 
-    pub fn download_with_progress(&self, remote_path: &str, dest: &Path, on_bytes: &mut dyn FnMut(u64)) -> ApiResult<()> {
+    pub fn download_with_progress(&self, remote_path: &str, dest: &Path, on_bytes: &mut dyn FnMut(u64) -> std::io::Result<()>) -> ApiResult<()> {
         let mut resp = Self::check(
             self.auth(self.http.get(self.url("/files/download")))
                 .query(&[("path", remote_path)])
@@ -225,7 +255,7 @@ impl Api {
                 break;
             }
             out.write_all(&buf[..n])?;
-            on_bytes(n as u64);
+            on_bytes(n as u64)?;
         }
         let f = out.into_inner().map_err(|e| ApiError::Io(e.into_error()))?;
         f.sync_all()?;
@@ -254,6 +284,15 @@ impl Api {
 
     pub fn list_shares(&self) -> ApiResult<Vec<Share>> {
         Ok(Self::check(self.auth(self.http.get(self.url("/shares"))).send()?)?.json()?)
+    }
+
+    pub fn update_share(&self, token: &str, settings: &ShareSettings) -> ApiResult<Share> {
+        Ok(Self::check(
+            self.auth(self.http.patch(self.url(&format!("/shares/{token}"))))
+                .json(settings)
+                .send()?,
+        )?
+        .json()?)
     }
 
     pub fn delete_share(&self, token: &str) -> ApiResult<()> {
@@ -349,10 +388,10 @@ struct CountingReader<R, F> {
     on_bytes: F,
 }
 
-impl<R: std::io::Read, F: Fn(u64)> std::io::Read for CountingReader<R, F> {
+impl<R: std::io::Read, F: Fn(u64) -> std::io::Result<()>> std::io::Read for CountingReader<R, F> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let n = self.inner.read(buf)?;
-        (self.on_bytes)(n as u64);
+        (self.on_bytes)(n as u64)?;
         Ok(n)
     }
 }

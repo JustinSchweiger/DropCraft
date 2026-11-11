@@ -30,6 +30,8 @@ if [ -n "$NEW_DOMAIN" ]; then
   fi
 fi
 
+mkdir -p data/public && chown 10001:10001 data data/public
+
 echo "==> Baue und starte den Server neu (dauert ein paar Minuten) ..."
 docker compose up -d --build
 docker compose restart caddy >/dev/null

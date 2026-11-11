@@ -22,6 +22,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     api::{Api, ApiError, RemoteEntry},
+    bandwidth::{BandwidthRef, PauseFlag},
     hooks::{FullDownload, LocalHooks},
     progress::{self, ProgressRef},
     state::{State, Synced},
@@ -37,12 +38,16 @@ pub enum SyncError {
     Io(#[from] std::io::Error),
     #[error("Sync-Ordner nicht gefunden: {0}")]
     RootMissing(String),
+    #[error("Pausiert")]
+    Paused,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventKind {
     Uploaded,
     Downloaded,
+    /// Neu vom Server, nur als Platzhalter (nicht heruntergeladen).
+    NewOnline,
     DeletedLocal,
     DeletedRemote,
     Conflict,
@@ -55,6 +60,8 @@ pub struct Event {
     pub path: String,
     pub detail: String,
     pub at: chrono::DateTime<chrono::Local>,
+    /// Wer die Änderung gemacht hat (bei Änderungen vom Server).
+    pub by: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -104,6 +111,8 @@ pub struct SyncEngine {
     report: Report,
     progress: ProgressRef,
     hooks: Box<dyn LocalHooks>,
+    bandwidth: BandwidthRef,
+    pause: PauseFlag,
 }
 
 impl SyncEngine {
@@ -116,6 +125,43 @@ impl SyncEngine {
             report: Report::default(),
             progress: ProgressRef::default(),
             hooks: Box::new(FullDownload),
+            bandwidth: BandwidthRef::default(),
+            pause: PauseFlag::default(),
+        }
+    }
+
+    /// Gemeinsame Bandbreitenlimits (für alle Konten dieselben).
+    pub fn set_bandwidth(&mut self, bw: BandwidthRef) {
+        self.bandwidth = bw;
+    }
+
+    /// Pausieren-Schalter: bricht laufende Übertragungen sofort ab.
+    pub fn set_pause_flag(&mut self, flag: PauseFlag) {
+        self.pause = flag;
+    }
+
+    fn check_pause(&self) -> Result<(), SyncError> {
+        if self.pause.load(std::sync::atomic::Ordering::SeqCst) {
+            Err(SyncError::Paused)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Rückruf für Übertragungen: Fortschritt, Bandbreite, Abbruch.
+    fn transfer_cb(&self, upload: bool) -> impl Fn(u64) -> std::io::Result<()> + Send + 'static {
+        let (prog, bw, pause) = (self.progress.clone(), self.bandwidth.clone(), self.pause.clone());
+        move |n| {
+            if pause.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "Pausiert"));
+            }
+            if upload {
+                bw.up.take(n);
+            } else {
+                bw.down.take(n);
+            }
+            progress::advance(&prog, n);
+            Ok(())
         }
     }
 
@@ -182,10 +228,12 @@ impl SyncEngine {
                 }
             }
             for e in &changes.entries {
+                self.check_pause()?;
                 let res = self.apply_remote(e);
                 progress::drop_queued(&self.progress, &e.path, false);
                 match res {
                     Ok(()) => {}
+                    Err(SyncError::Paused) => return Err(SyncError::Paused),
                     Err(SyncError::Api(err @ (ApiError::Network(_) | ApiError::Unauthorized))) => {
                         return Err(err.into())
                     }
@@ -209,14 +257,14 @@ impl SyncEngine {
                     Ok(m) if m.is_dir() => {
                         // Nur leere Ordner löschen; neue lokale Dateien bleiben.
                         if fs::remove_dir(&local).is_ok() {
-                            self.event(EventKind::DeletedLocal, &e.path, String::new());
+                            self.event_by(EventKind::DeletedLocal, &e.path, String::new(), e.modified_by.clone());
                         }
                     }
                     Ok(m) => {
                         let s = st.as_ref().unwrap();
                         if local_unchanged(s, &m) {
                             fs::remove_file(&local)?;
-                            self.event(EventKind::DeletedLocal, &e.path, String::new());
+                            self.event_by(EventKind::DeletedLocal, &e.path, String::new(), e.modified_by.clone());
                         }
                         // Lokal geändert: Datei behalten, sie wird neu hochgeladen.
                     }
@@ -295,13 +343,14 @@ impl SyncEngine {
                     }
                     if self.hooks.create_placeholder(&local, e)? {
                         self.remember_file(e, &local)?;
+                        self.event_by(EventKind::NewOnline, &e.path, human_size(e.size), e.modified_by.clone());
                         return Ok(());
                     }
                 }
             }
         }
         self.download(e, &local)?;
-        self.event(EventKind::Downloaded, &e.path, human_size(e.size));
+        self.event_by(EventKind::Downloaded, &e.path, human_size(e.size), e.modified_by.clone());
         Ok(())
     }
 
@@ -310,9 +359,9 @@ impl SyncEngine {
         fs::create_dir_all(&parent)?;
         let tmp = parent.join(format!(".dropcraft-{}.tmp", uuid::Uuid::new_v4()));
         progress::start(&self.progress, &e.path, false, e.size as u64);
-        let prog = self.progress.clone();
         let res = (|| -> Result<(), SyncError> {
-            self.api.download_with_progress(&e.path, &tmp, &mut |n| progress::advance(&prog, n))?;
+            let cb = self.transfer_cb(false);
+            self.api.download_with_progress(&e.path, &tmp, &mut |n| cb(n))?;
             if let Some(expected) = &e.sha256 {
                 let got = hash_file(&tmp)?;
                 if &got != expected {
@@ -327,6 +376,7 @@ impl SyncEngine {
         progress::finish(&self.progress, res.is_ok());
         if res.is_err() {
             let _ = fs::remove_file(&tmp);
+            self.check_pause()?;
         }
         res?;
         self.hooks.mark_synced(local, false);
@@ -390,6 +440,7 @@ impl SyncEngine {
             }
         }
         for (path, item) in &local {
+            self.check_pause()?;
             let st = self.state.get(path);
             let res: Result<(), SyncError> = if item.is_dir {
                 if st.as_ref().map(|s| s.is_dir).unwrap_or(false) {
@@ -429,6 +480,7 @@ impl SyncEngine {
             };
             match res {
                 Ok(()) => {}
+                Err(SyncError::Paused) => return Err(SyncError::Paused),
                 Err(SyncError::Api(e @ (ApiError::Network(_) | ApiError::Unauthorized))) => return Err(e.into()),
                 Err(SyncError::Api(ApiError::QuotaExceeded)) => {
                     self.event(EventKind::Error, path, "Speicherplatz voll".into());
@@ -459,9 +511,11 @@ impl SyncEngine {
             }
         }
         let base_rev = st.map(|s| s.rev).unwrap_or(0);
-        let prog = self.progress.clone();
-        let result = self.api.upload_with_progress(path, &local, item.mtime, base_rev, move |n| progress::advance(&prog, n));
+        let result = self.api.upload_with_progress(path, &local, item.mtime, base_rev, self.transfer_cb(true));
         progress::finish(&self.progress, result.is_ok());
+        if result.is_err() {
+            self.check_pause()?;
+        }
         match result {
             Ok(r) => {
                 // Den Stand vom Scan merken. Hat sich die Datei während des
@@ -514,6 +568,7 @@ impl SyncEngine {
                     modified_at: 0,
                     rev: s.rev,
                     deleted: false,
+                    modified_by: None,
                 };
                 progress::enqueue(&self.progress, &s.path, false, s.size as u64);
                 let modified = fs::metadata(&local).ok().map(|m| mtime_ms(&m)).unwrap_or(0);
@@ -521,6 +576,7 @@ impl SyncEngine {
                 progress::drop_queued(&self.progress, &s.path, false);
                 match res {
                     Ok(()) => self.event(EventKind::Downloaded, &s.path, human_size(s.size)),
+                    Err(SyncError::Paused) => return Err(SyncError::Paused),
                     Err(SyncError::Api(err @ (ApiError::Network(_) | ApiError::Unauthorized))) => return Err(err.into()),
                     Err(err) => self.event(EventKind::Error, &s.path, err.to_string()),
                 }
@@ -605,6 +661,10 @@ impl SyncEngine {
     }
 
     fn event(&mut self, kind: EventKind, path: &str, detail: String) {
+        self.event_by(kind, path, detail, None);
+    }
+
+    fn event_by(&mut self, kind: EventKind, path: &str, detail: String, by: Option<String>) {
         match kind {
             EventKind::Downloaded => self.report.downloaded += 1,
             EventKind::DeletedLocal => self.report.deleted += 1,
@@ -612,7 +672,7 @@ impl SyncEngine {
             _ => {}
         }
         log::info!("{kind:?} {path} {detail}");
-        let ev = Event { kind, path: path.to_string(), detail, at: chrono::Local::now() };
+        let ev = Event { kind, path: path.to_string(), detail, at: chrono::Local::now(), by };
         self.progress.lock().unwrap().events.push(ev.clone());
         self.report.events.push(ev);
     }

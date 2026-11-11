@@ -11,13 +11,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use dropcraft_core::{Api, ApiError, Event, ProgressRef, State, SyncEngine, SyncError};
+use dropcraft_core::{Api, ApiError, BandwidthRef, Event, PauseFlag, ProgressRef, State, SyncEngine, SyncError};
 use notify::{RecursiveMode, Watcher};
 
 use crate::{config::Account, folder_icon};
 
 pub enum Cmd {
     SyncNow,
+    #[allow(dead_code)]
     SetPaused(bool),
     FsChanged,
     Stop,
@@ -59,7 +60,7 @@ const RETRY: Duration = Duration::from_secs(60);
 const DEBOUNCE: Duration = Duration::from_millis(2500);
 const MAX_ACTIVITY: usize = 100;
 
-pub fn spawn(cfg: Account, shared: SharedRef, repaint: egui::Context) -> Sender<Cmd> {
+pub fn spawn(cfg: Account, shared: SharedRef, repaint: egui::Context, pause_flag: PauseFlag, bandwidth: BandwidthRef) -> Sender<Cmd> {
     let (tx, rx) = mpsc::channel::<Cmd>();
     let tx_watch = tx.clone();
     #[cfg_attr(not(all(windows, feature = "cloud-files")), allow(unused_variables))]
@@ -93,6 +94,8 @@ pub fn spawn(cfg: Account, shared: SharedRef, repaint: egui::Context) -> Sender<
             folder_icon::apply(&cfg.sync_dir);
             let mut engine = SyncEngine::new(api.clone(), cfg.sync_dir.clone(), state, cfg.device_name.clone());
             shared.lock().unwrap().progress = Some(engine.progress());
+            engine.set_pause_flag(pause_flag.clone());
+            engine.set_bandwidth(bandwidth);
 
             // Platzhalter statt vollständiger Downloads (Windows, optional).
             #[cfg(all(windows, feature = "cloud-files"))]
@@ -131,12 +134,13 @@ pub fn spawn(cfg: Account, shared: SharedRef, repaint: egui::Context) -> Sender<
                 let _ = w.watch(&cfg.sync_dir, RecursiveMode::Recursive);
             }
 
-            let mut paused = cfg.paused;
+            let is_paused = || pause_flag.load(std::sync::atomic::Ordering::SeqCst);
             loop {
-                if paused {
+                if is_paused() {
                     set(Phase::Paused);
                     match rx.recv() {
-                        Ok(Cmd::SetPaused(p)) => paused = p,
+                        // Der Zustand steht im gemeinsamen Schalter; die Nachricht weckt nur auf.
+                        Ok(Cmd::SetPaused(_)) => {}
                         Ok(Cmd::Remove) => {
                             remove_cloud(&cfg);
                             break;
@@ -162,6 +166,10 @@ pub fn spawn(cfg: Account, shared: SharedRef, repaint: egui::Context) -> Sender<
                     }
                     let wait = match result {
                         Ok(report) => {
+                            if !report.events.is_empty() {
+                                let (api, dev, evs) = (api.clone(), cfg.device_name.clone(), report.events.clone());
+                                std::thread::spawn(move || crate::notify::shared_folder_changes(&api, &dev, &evs));
+                            }
                             for ev in report.events {
                                 sh.activity.push_front(ev);
                             }
@@ -188,6 +196,10 @@ pub fn spawn(cfg: Account, shared: SharedRef, repaint: egui::Context) -> Sender<
                                     _ => {}
                                 }
                             }
+                        }
+                        Err(SyncError::Paused) => {
+                            sh.phase = Phase::Paused;
+                            Duration::from_millis(10)
                         }
                         Err(SyncError::Api(ApiError::Network(m))) => {
                             sh.phase = Phase::Offline(m);
@@ -221,10 +233,7 @@ pub fn spawn(cfg: Account, shared: SharedRef, repaint: egui::Context) -> Sender<
                                     remove_cloud(&cfg);
                                     return;
                                 }
-                                Ok(Cmd::SetPaused(p)) => {
-                                    paused = p;
-                                    break;
-                                }
+                                Ok(Cmd::SetPaused(_)) => break,
                                 Ok(Cmd::SyncNow) => break,
                                 Err(RecvTimeoutError::Timeout) => break,
                                 Err(RecvTimeoutError::Disconnected) => return,
@@ -232,7 +241,7 @@ pub fn spawn(cfg: Account, shared: SharedRef, repaint: egui::Context) -> Sender<
                         }
                     }
                     Ok(Cmd::SyncNow) | Err(RecvTimeoutError::Timeout) => {}
-                    Ok(Cmd::SetPaused(p)) => paused = p,
+                    Ok(Cmd::SetPaused(_)) => {}
                     Ok(Cmd::Remove) => {
                         remove_cloud(&cfg);
                         break;

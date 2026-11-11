@@ -40,11 +40,23 @@ pub struct Config {
     pub accounts: Vec<Account>,
     #[serde(default = "yes")]
     pub autostart: bool,
+    /// Bandbreitenlimit in MB/s, 0 = unbegrenzt.
+    #[serde(default)]
+    pub up_limit_mbps: f64,
+    #[serde(default)]
+    pub down_limit_mbps: f64,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { accounts: Vec::new(), autostart: true }
+        Self { accounts: Vec::new(), autostart: true, up_limit_mbps: 0.0, down_limit_mbps: 0.0 }
+    }
+}
+
+impl Config {
+    pub fn apply_bandwidth(&self, bw: &dropcraft_core::Bandwidth) {
+        bw.up.set_limit((self.up_limit_mbps.max(0.0) * 1_000_000.0) as u64);
+        bw.down.set_limit((self.down_limit_mbps.max(0.0) * 1_000_000.0) as u64);
     }
 }
 
@@ -103,7 +115,7 @@ impl Config {
                     let _ = std::fs::rename(&from, acc.state_dir().join(format!("state.db{ext}")));
                 }
             }
-            let cfg = Config { accounts: vec![acc], autostart: old.autostart };
+            let cfg = Config { accounts: vec![acc], autostart: old.autostart, ..Config::default() };
             let _ = cfg.save();
             return cfg;
         }
@@ -218,7 +230,7 @@ mod tests {
 
     #[test]
     fn overlap() {
-        let c = Config { accounts: vec![acc("/home/j/DropCraft")], autostart: true };
+        let c = Config { accounts: vec![acc("/home/j/DropCraft")], ..Config::default() };
         assert!(c.overlapping_account(Path::new("/home/j/DropCraft"), None).is_some());
         assert!(c.overlapping_account(Path::new("/home/j/DropCraft/Sub"), None).is_some());
         assert!(c.overlapping_account(Path::new("/home/j"), None).is_some());
