@@ -110,6 +110,7 @@ pub fn spawn(cfg: Account, shared: SharedRef, repaint: egui::Context, pause_flag
                         path: "Cloud-Dateien".into(),
                         detail: e,
                         at: chrono::Local::now(),
+                        by: None,
                     });
                     None
                 }
