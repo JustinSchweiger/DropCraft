@@ -380,7 +380,7 @@ pub async fn page(State(state): State<AppState>, Path(token): Path<String>, Quer
         let files_count = items.iter().filter(|e| !e.is_dir).count();
         let total: i64 = items.iter().map(|e| e.size).sum();
         body.push_str(&format!(
-            r#"<div class="bar"><span class="meta">{} Ordner · {} Dateien · {}</span><a class="btn primary" href="{base}/zip?p={}">{ICON_DOWNLOAD}Alles als ZIP</a></div>"#,
+            r#"<div class="bar"><span class="meta">{} Ordner · {} Dateien · {}</span><a class="btn primary" href="{base}/zip?p={}">{ICON_DOWNLOAD}Alles herunterladen</a></div>"#,
             items.len() - files_count,
             files_count,
             human(total),
