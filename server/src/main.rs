@@ -4,12 +4,13 @@ mod db;
 mod error;
 mod files;
 mod paths;
+mod shares;
 
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use axum::{
     extract::DefaultBodyLimit,
-    routing::{get, patch, post, put},
+    routing::{delete, get, patch, post, put},
     Json, Router,
 };
 use sqlx::SqlitePool;
@@ -74,9 +75,16 @@ pub fn router(state: AppState) -> Router {
         .route("/files/move", post(files::move_entry))
         .route("/sync/changes", get(files::changes))
         .route("/admin/users", get(admin::list_users).post(admin::create_user))
-        .route("/admin/users/{id}", patch(admin::update_user).delete(admin::delete_user));
+        .route("/admin/users/{id}", patch(admin::update_user).delete(admin::delete_user))
+        .route("/shares", get(shares::list).post(shares::create))
+        .route("/shares/{token}", delete(shares::delete));
+    let public = Router::new()
+        .route("/s/{token}", get(shares::page))
+        .route("/s/{token}/file", get(shares::file))
+        .route("/s/{token}/zip", get(shares::zip));
     Router::new()
         .nest("/api", api)
+        .merge(public)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

@@ -63,6 +63,37 @@ check "Speicher freigegeben" "$(curl -s "${A[@]}" $B/me | jq .used_bytes)" 0
 check "Blob-Datei gelöscht" "$(find "$DATA/users/1/blobs" -type f | wc -l)" 0
 check "Feed paginiert" "$(curl -s "${A[@]}" "$B/sync/changes?cursor=$C0&limit=2" | jq .has_more)" true
 
+# Range-Downloads
+printf '0123456789' > /tmp/r.txt
+curl -s -o /dev/null "${A[@]}" -X PUT --data-binary @/tmp/r.txt "$B/files/upload?path=r.txt"
+check "Range 2-5" "$(curl -s "${A[@]}" -H 'Range: bytes=2-5' "$B/files/download?path=r.txt")" "2345"
+check "Range Status 206" "$(code "${A[@]}" -H 'Range: bytes=2-' "$B/files/download?path=r.txt")" 206
+check "Range Suffix" "$(curl -s "${A[@]}" -H 'Range: bytes=-3' "$B/files/download?path=r.txt")" "789"
+
+# Freigaben
+mkdir -p /tmp/sh && echo "Hallo Welt" > "/tmp/sh/Grüße & <Test>.txt"
+curl -s -o /dev/null "${A[@]}" -X PUT --data-binary "@/tmp/sh/Grüße & <Test>.txt" "$B/files/upload?path=Teilen/Grüße%20%26%20%3CTest%3E.txt"
+curl -s -o /dev/null "${A[@]}" -X PUT --data-binary @/tmp/r.txt "$B/files/upload?path=Teilen/Unter/zahlen.txt"
+curl -s -o /dev/null "${A[@]}" -X PUT --data-binary @/tmp/r.txt "$B/files/upload?path=Privat/geheim.txt"
+TOK=$(J "${A[@]}" -X POST $B/shares -d '{"path":"Teilen"}' | jq -r .token)
+check "Freigabe angelegt" "${#TOK}" 24
+check "gleicher Pfad -> gleicher Link" "$(J "${A[@]}" -X POST $B/shares -d '{"path":"Teilen"}' | jq -r .token)" "$TOK"
+S=http://127.0.0.1:18080/s/$TOK
+check "Seite erreichbar ohne Login" "$(code $S)" 200
+check "Dateiname escaped" "$(curl -s $S | grep -c 'Grüße &amp; &lt;Test&gt;.txt')" 1
+check "kein rohes <Test> im HTML" "$(curl -s $S | grep -c '<Test>')" 0
+check "Unterordner" "$(curl -s "$S?p=Unter" | grep -c 'zahlen.txt')" 1
+check "Datei laden" "$(curl -s "$S/file?p=Unter/zahlen.txt")" "0123456789"
+check "Ausbruch mit .. verhindert" "$(code "$S/file?p=../Privat/geheim.txt")" 404
+check "Ausbruch kodiert verhindert" "$(code "$S/file?p=..%2FPrivat%2Fgeheim.txt")" 404
+check "falscher Token" "$(code http://127.0.0.1:18080/s/abc)" 404
+curl -s -o /tmp/t.zip "$S/zip"
+check "ZIP gültig" "$(python3 -c "import zipfile;z=zipfile.ZipFile('/tmp/t.zip');print(sorted(z.namelist()), z.read('Unter/zahlen.txt').decode())")" "['Grüße & <Test>.txt', 'Unter/zahlen.txt'] 0123456789"
+check "Anna kann Justins Freigabe nicht löschen" "$(code "${Bh[@]}" -X DELETE $B/shares/$TOK)" 404
+check "Liste" "$(curl -s "${A[@]}" $B/shares | jq length)" 1
+check "Freigabe löschen" "$(code "${A[@]}" -X DELETE $B/shares/$TOK)" 200
+check "danach weg" "$(code $S)" 404
+
 # Logout
 check "logout" "$(code "${A[@]}" -X POST $B/auth/logout)" 200
 check "Token danach ungültig" "$(code "${A[@]}" $B/me)" 401

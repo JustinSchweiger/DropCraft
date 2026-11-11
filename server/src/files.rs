@@ -127,7 +127,7 @@ async fn ensure_parents(tx: &mut Tx<'_>, user_id: i64, path: &str) -> ApiResult<
     Ok(())
 }
 
-async fn get_live_pool(state: &AppState, user_id: i64, path: &str) -> ApiResult<Option<Entry>> {
+pub async fn get_live_pool(state: &AppState, user_id: i64, path: &str) -> ApiResult<Option<Entry>> {
     Ok(sqlx::query_as(&format!(
         "SELECT {ENTRY_COLS} FROM files WHERE user_id = ? AND path = ? AND deleted = 0"
     ))
@@ -158,36 +158,56 @@ pub struct ListEntry {
     entry: Entry,
 }
 
+/// Direkte Kinder eines Ordners (nicht gelöscht), Ordner zuerst.
+pub async fn children(state: &AppState, user_id: i64, dir: &str) -> ApiResult<Vec<Entry>> {
+    Ok(if dir.is_empty() {
+        sqlx::query_as(&format!(
+            "SELECT {ENTRY_COLS} FROM files WHERE user_id = ? AND deleted = 0 AND instr(path, '/') = 0 \
+             ORDER BY is_dir DESC, path COLLATE NOCASE"
+        ))
+        .bind(user_id)
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        sqlx::query_as(&format!(
+            "SELECT {ENTRY_COLS} FROM files WHERE user_id = ? AND deleted = 0 \
+             AND path LIKE ? ESCAPE '\\' AND instr(substr(path, ?), '/') = 0 \
+             ORDER BY is_dir DESC, path COLLATE NOCASE"
+        ))
+        .bind(user_id)
+        .bind(paths::like_prefix(dir))
+        .bind(dir.len() as i64 + 2)
+        .fetch_all(&state.db)
+        .await?
+    })
+}
+
+/// Alle Dateien unterhalb eines Ordners (für ZIP-Downloads).
+pub async fn files_below(state: &AppState, user_id: i64, dir: &str) -> ApiResult<Vec<Entry>> {
+    Ok(sqlx::query_as(&format!(
+        "SELECT {ENTRY_COLS} FROM files WHERE user_id = ? AND deleted = 0 AND is_dir = 0 \
+         AND (? = '' OR path LIKE ? ESCAPE '\\') ORDER BY path"
+    ))
+    .bind(user_id)
+    .bind(dir)
+    .bind(paths::like_prefix(dir))
+    .fetch_all(&state.db)
+    .await?)
+}
+
 pub async fn list(
     State(state): State<AppState>,
     user: AuthUser,
     Query(q): Query<PathQuery>,
 ) -> ApiResult<Json<ListResp>> {
     let dir = paths::normalize(&q.path)?;
-    let rows: Vec<Entry> = if dir.is_empty() {
-        sqlx::query_as(&format!(
-            "SELECT {ENTRY_COLS} FROM files WHERE user_id = ? AND deleted = 0 AND instr(path, '/') = 0 \
-             ORDER BY is_dir DESC, path COLLATE NOCASE"
-        ))
-        .bind(user.id)
-        .fetch_all(&state.db)
-        .await?
-    } else {
+    if !dir.is_empty() {
         match get_live_pool(&state, user.id, &dir).await? {
             Some(e) if e.is_dir => {}
             _ => return Err(ApiError::NotFound),
         }
-        sqlx::query_as(&format!(
-            "SELECT {ENTRY_COLS} FROM files WHERE user_id = ? AND deleted = 0 \
-             AND path LIKE ? ESCAPE '\\' AND instr(substr(path, ?), '/') = 0 \
-             ORDER BY is_dir DESC, path COLLATE NOCASE"
-        ))
-        .bind(user.id)
-        .bind(paths::like_prefix(&dir))
-        .bind(dir.len() as i64 + 2)
-        .fetch_all(&state.db)
-        .await?
-    };
+    }
+    let rows = children(&state, user.id, &dir).await?;
     let entries = rows
         .into_iter()
         .map(|e| ListEntry {
@@ -349,26 +369,30 @@ pub async fn download(
     State(state): State<AppState>,
     user: AuthUser,
     Query(q): Query<PathQuery>,
+    headers: HeaderMap,
 ) -> ApiResult<Response> {
     let path = paths::normalize_non_root(&q.path)?;
     let entry = get_live_pool(&state, user.id, &path).await?.ok_or(ApiError::NotFound)?;
     if entry.is_dir {
         return Err(ApiError::BadRequest("Ordner können nicht heruntergeladen werden".into()));
     }
+    serve_blob(&state, user.id, &entry, &headers, true).await
+}
+
+/// Liefert eine Datei aus, mit Unterstützung für `Range`-Anfragen.
+pub async fn serve_blob(state: &AppState, user_id: i64, entry: &Entry, req: &HeaderMap, attachment: bool) -> ApiResult<Response> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let blob_id = entry.blob_id.clone().ok_or(ApiError::NotFound)?;
-    let file = tokio::fs::File::open(state.user_blob_dir(user.id).join(blob_id)).await?;
+    let mut file = tokio::fs::File::open(state.user_blob_dir(user_id).join(blob_id)).await?;
+    let total = entry.size as u64;
+    let range = req.get(header::RANGE).and_then(|v| v.to_str().ok()).and_then(|r| parse_range(r, total));
+
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
-    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(entry.size as u64));
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(guess_mime(&entry.path)));
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     let name = entry.path.rsplit('/').next().unwrap_or("datei");
-    let encoded: String = name
-        .bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-' | b'_' => (b as char).to_string(),
-            _ => format!("%{b:02X}"),
-        })
-        .collect();
-    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename*=UTF-8''{encoded}")) {
+    let disp = if attachment { "attachment" } else { "inline" };
+    if let Ok(v) = HeaderValue::from_str(&format!("{disp}; filename*=UTF-8''{}", pct_encode(name))) {
         headers.insert(header::CONTENT_DISPOSITION, v);
     }
     if let Some(sha) = &entry.sha256 {
@@ -378,7 +402,71 @@ pub async fn download(
     }
     headers.insert("x-rev", HeaderValue::from(entry.rev));
     headers.insert("x-modified-at", HeaderValue::from(entry.modified_at));
-    Ok((headers, Body::from_stream(ReaderStream::with_capacity(file, 1 << 16))).into_response())
+
+    match range {
+        Some((start, end)) => {
+            file.seek(std::io::SeekFrom::Start(start)).await?;
+            let len = end - start + 1;
+            headers.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+            if let Ok(v) = HeaderValue::from_str(&format!("bytes {start}-{end}/{total}")) {
+                headers.insert(header::CONTENT_RANGE, v);
+            }
+            let body = Body::from_stream(ReaderStream::with_capacity(file.take(len), 1 << 16));
+            Ok((StatusCode::PARTIAL_CONTENT, headers, body).into_response())
+        }
+        None => {
+            headers.insert(header::CONTENT_LENGTH, HeaderValue::from(total));
+            Ok((headers, Body::from_stream(ReaderStream::with_capacity(file, 1 << 16))).into_response())
+        }
+    }
+}
+
+/// "bytes=a-b", "bytes=a-", "bytes=-n" -> (start, end) inklusive. Nur ein Bereich.
+pub fn parse_range(h: &str, total: u64) -> Option<(u64, u64)> {
+    let spec = h.strip_prefix("bytes=")?.trim();
+    if spec.contains(',') || total == 0 {
+        return None;
+    }
+    let (a, b) = spec.split_once('-')?;
+    let (start, end) = if a.is_empty() {
+        let n: u64 = b.parse().ok()?;
+        (total.saturating_sub(n), total - 1)
+    } else {
+        let start: u64 = a.parse().ok()?;
+        let end = if b.is_empty() { total - 1 } else { b.parse::<u64>().ok()?.min(total - 1) };
+        (start, end)
+    };
+    (start <= end && start < total).then_some((start, end))
+}
+
+pub fn pct_encode(name: &str) -> String {
+    name.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-' | b'_' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+pub fn guess_mime(path: &str) -> &'static str {
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "txt" | "md" | "csv" | "log" => "text/plain; charset=utf-8",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
+        "zip" => "application/zip",
+        _ => "application/octet-stream",
+    }
 }
 
 // ---------------------------------------------------------------- mkdir / delete / move

@@ -1,6 +1,5 @@
 # Caddy holt automatisch ein HTTPS-Zertifikat von Let's Encrypt.
 {$DROPCRAFT_DOMAIN} {
-	encode zstd gzip
 	reverse_proxy dropcraft:8080 {
 		# Große Uploads nicht puffern, direkt durchreichen.
 		flush_interval -1

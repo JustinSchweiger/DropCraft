@@ -58,6 +58,7 @@ pub async fn connect(data_dir: &Path) -> anyhow::Result<SqlitePool> {
         .connect_with(opts)
         .await?;
     sqlx::raw_sql(SCHEMA).execute(&pool).await?;
+    sqlx::raw_sql(crate::shares::SCHEMA).execute(&pool).await?;
     Ok(pool)
 }
 
