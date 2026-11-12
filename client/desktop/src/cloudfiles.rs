@@ -69,7 +69,22 @@ fn metadata_for(e: &RemoteEntry) -> Metadata {
 
 /// Pfad im Sync-Ordner -> Server-Pfad ("a/b.txt").
 fn remote_of(root: &Path, local: &Path) -> Option<String> {
-    let rel = local.strip_prefix(root).ok()?;
+    // Windows liefert Pfade teils in anderer Groß-/Kleinschreibung.
+    let rel = match local.strip_prefix(root) {
+        Ok(r) => r.to_path_buf(),
+        Err(_) => {
+            let (r, l) = (root.to_string_lossy().to_lowercase(), local.to_string_lossy());
+            let r = r.trim_end_matches('\\');
+            if !l.to_lowercase().starts_with(r) {
+                return None;
+            }
+            let rest = l.get(r.len()..)?;
+            if !(rest.is_empty() || rest.starts_with('\\')) {
+                return None;
+            }
+            PathBuf::from(rest.trim_start_matches('\\'))
+        }
+    };
     let parts: Option<Vec<&str>> = rel.components().map(|c| c.as_os_str().to_str()).collect();
     Some(parts?.join("/"))
 }
@@ -225,10 +240,19 @@ struct Provider {
 }
 
 impl Provider {
+    /// Vollständiger Pfad der angefragten Datei. `Request::path()` enthält
+    /// den Laufwerksbuchstaben bereits („C:\DropCraft\…“); früher wurde er
+    /// doppelt vorangestellt („C:C:\…“) – dann passte nichts zum Sync-Ordner
+    /// und jeder Abruf scheiterte mit Fehler 390.
     fn full_path(&self, req: &Request) -> PathBuf {
-        let mut s = req.volume_letter();
-        s.push(req.path().as_os_str());
-        PathBuf::from(s)
+        let p = req.path();
+        if p.has_root() && p.components().next().map(|c| matches!(c, std::path::Component::Prefix(_))).unwrap_or(false) {
+            p
+        } else {
+            let mut s = req.volume_letter();
+            s.push(p.as_os_str());
+            PathBuf::from(s)
+        }
     }
 }
 
