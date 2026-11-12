@@ -33,6 +33,7 @@ struct SharesView: View {
                 }
             }
             .navigationTitle("Freigaben")
+            .navigationBarTitleDisplayMode(.large)
             .navigationDestination(for: Share.self) { sh in
                 ShareDetail(share: sh) { await load() }
             }

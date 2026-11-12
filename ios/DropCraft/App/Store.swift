@@ -173,7 +173,9 @@ final class AppModel: ObservableObject {
 enum Fmt {
     static func size(_ bytes: Int64) -> String {
         let f = ByteCountFormatter()
-        f.countStyle = .file
+        // Binär wie Server und Desktop-App (100 GB Kontingent = 100 GB)
+        f.countStyle = .memory
+        f.allowsNonnumericFormatting = false
         f.allowedUnits = [.useKB, .useMB, .useGB, .useTB]
         return f.string(fromByteCount: bytes)
     }

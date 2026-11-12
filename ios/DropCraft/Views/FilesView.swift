@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 /// Dateien-Tab: Ordner durchblättern, hochladen, teilen.
 struct FilesRoot: View {
     // Startordner; für automatische Bildschirmfotos per Umgebungsvariable
-    @State private var path: [String] = ProcessInfo.processInfo.environment["DC_PATH"].map { [$0] } ?? []
+    @State private var path: [String] = ProcessInfo.processInfo.environment["DC_PATH"].flatMap { $0.isEmpty ? nil : [$0] } ?? []
 
     var body: some View {
         NavigationStack(path: $path) {
