@@ -305,6 +305,21 @@ pub fn connect(
         return Err("Windows unterstützt hier keine Cloud-Dateien".into());
     }
     let id = root_id(account_id)?;
+    // Alte DropCraft-Registrierungen für denselben Ordner entfernen (z. B.
+    // nach erneutem Hinzufügen des Kontos). Zwei Registrierungen für einen
+    // Ordner lassen die neue scheitern; Windows meldet dann bei jeder Datei
+    // „nur unter einem Cloudsynchronisierungsstamm unterstützt“ (0x80070186).
+    if let Ok(roots) = cloud_filter::root::active_roots() {
+        let ours = id.to_os_string();
+        let norm = |p: &Path| p.to_string_lossy().trim_end_matches('\\').to_lowercase();
+        for r in roots {
+            let rid = r.id();
+            let theirs = rid.to_os_string();
+            if theirs != ours && theirs.to_string_lossy().starts_with("DropCraft!") && norm(&r.path()) == norm(root) {
+                let _ = rid.unregister();
+            }
+        }
+    }
     // Immer neu registrieren: aktualisiert Name und Symbol einer bestehenden
     // Registrierung, Platzhalter bleiben erhalten.
     {
@@ -318,7 +333,9 @@ pub fn connect(
             .with_icon(format!("{},0", icon.display()))
             .with_path(root)
             .map_err(|e| e.to_string())?;
-        id.register(info).map_err(|e| format!("Registrierung fehlgeschlagen: {e}"))?;
+        id.register(info).map_err(|e| {
+            format!("Registrierung fehlgeschlagen: {e}. Liegt der Ordner in OneDrive oder einem anderen Cloud-Ordner? Dann einen anderen Speicherort wählen.")
+        })?;
     }
     let provider = Provider { root: root.to_path_buf(), api, progress, wake };
     let conn = Session::new().connect(root, provider).map_err(|e| format!("Verbindung fehlgeschlagen: {e}"))?;

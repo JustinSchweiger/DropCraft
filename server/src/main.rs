@@ -5,6 +5,7 @@ mod error;
 mod files;
 mod paths;
 mod shares;
+mod webapp;
 
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
@@ -76,6 +77,7 @@ pub fn router(state: AppState) -> Router {
         .route("/files/delete", post(files::delete))
         .route("/files/move", post(files::move_entry))
         .route("/sync/changes", get(files::changes))
+        .route("/files/link", get(webapp::link))
         .route("/admin/users", get(admin::list_users).post(admin::create_user))
         .route("/admin/users/{id}", patch(admin::update_user).delete(admin::delete_user))
         .route("/shares", get(shares::list).post(shares::create))
@@ -84,6 +86,10 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(shares::landing))
         .route("/download/windows", get(shares::download_app))
         .route("/assets/upload.js", get(shares::upload_js))
+        .route("/dl", get(webapp::dl))
+        .route("/app", get(|| async { axum::response::Redirect::permanent("/app/") }))
+        .route("/app/", get(webapp::index))
+        .route("/app/{name}", get(webapp::file))
         .route("/assets/player.js", get(shares::player_js))
         .route("/s/{token}", get(shares::page))
         .route("/s/{token}/view", get(shares::view))

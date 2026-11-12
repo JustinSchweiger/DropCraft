@@ -392,7 +392,7 @@ pub async fn page(State(state): State<AppState>, Path(token): Path<String>, Quer
             body.push_str(&format!(
                 r#"<form class="drop" id="drop" method="post" enctype="multipart/form-data" action="{base}/upload?p={}">
 <input id="pick" class="pick" type="file" name="files" multiple required>
-<label for="pick" class="drop-area">{ICON_UPLOAD_BIG}<span class="drop-main">Dateien hierher ziehen</span><span class="drop-sub">oder <u>auswählen</u></span></label>
+<label for="pick" class="drop-area">{ICON_UPLOAD_BIG}<span class="drop-main"><span class="desk">Dateien hierher ziehen</span><span class="touch">Fotos oder Dateien hochladen</span></span><span class="drop-sub"><span class="desk">oder <u>auswählen</u></span><span class="touch"><u>Tippen zum Auswählen</u></span></span></label>
 <div class="drop-progress" hidden><div class="drop-line"><span class="drop-status">Wird hochgeladen …</span><span class="drop-pct">0 %</span></div><div class="track"><div class="fill"></div></div></div>
 <noscript><button class="btn primary" type="submit">Hochladen</button></noscript>
 </form><script src="/assets/upload.js" defer></script>"#,
@@ -409,12 +409,12 @@ pub async fn page(State(state): State<AppState>, Path(token): Path<String>, Quer
             let rel = url_q(&rel_of(&r, name));
             if e.is_dir {
                 body.push_str(&format!(
-                    r#"<li><a class="row" href="{base}?p={rel}"><span class="ic dir">{ICON_FOLDER}</span><span class="name">{}</span><span class="meta">Ordner</span></a></li>"#,
+                    r#"<li><a class="row" href="{base}?p={rel}"><span class="ic dir">{ICON_FOLDER}</span><span class="txt"><span class="name">{}</span><span class="meta">Ordner</span></span></a></li>"#,
                     esc(name)
                 ));
             } else {
                 let view = if is_viewable(name) {
-                    format!(r#"<a class="btn" href="{base}/view?p={rel}">Ansehen</a>"#)
+                    format!(r#"<a class="btn icon" href="{base}/view?p={rel}" aria-label="{} ansehen" title="Ansehen">{ICON_EYE}</a>"#, esc(name))
                 } else {
                     String::new()
                 };
@@ -424,7 +424,7 @@ pub async fn page(State(state): State<AppState>, Path(token): Path<String>, Quer
                     icon_for(name).to_string()
                 };
                 body.push_str(&format!(
-                    r#"<li><div class="row"><span class="ic">{}</span><span class="name">{}</span><span class="meta">{} · {}</span>{view}<a class="btn" href="{base}/file?p={rel}" aria-label="{} herunterladen">{ICON_DOWNLOAD}</a></div></li>"#,
+                    r#"<li><div class="row"><span class="ic">{}</span><span class="txt"><span class="name">{}</span><span class="meta">{} · {}</span></span>{view}<a class="btn icon" href="{base}/file?p={rel}" aria-label="{} herunterladen" title="Herunterladen">{ICON_DOWNLOAD}</a></div></li>"#,
                     ic,
                     esc(name),
                     human(e.size),
@@ -577,7 +577,7 @@ fn app_exe(state: &AppState) -> std::path::PathBuf {
 pub async fn landing(State(state): State<AppState>) -> Response {
     let download = match tokio::fs::metadata(app_exe(&state)).await {
         Ok(m) => format!(
-            r#"<a class="btn primary big" href="/download/windows">{ICON_DOWNLOAD}Windows-App herunterladen</a><span class="meta">DropCraft.exe · {}</span>"#,
+            r#"<a class="btn big" href="/download/windows">{ICON_DOWNLOAD}Windows-App herunterladen</a><span class="meta">DropCraft.exe · {}</span>"#,
             human(m.len() as i64)
         ),
         Err(_) => String::new(),
@@ -585,7 +585,7 @@ pub async fn landing(State(state): State<AppState>) -> Response {
     let body = format!(
         r#"<section class="hero"><div class="hero-logo">{ICON_CUBE_BIG}</div><h1>DropCraft</h1>
 <p class="lead">Private Cloud zum Synchronisieren und Teilen von Dateien.</p>
-<div class="hero-actions">{download}</div>
+<div class="hero-actions"><a class="btn primary big" href="/app/">Im Browser öffnen</a>{download}</div>
 <p class="meta">Du hast einen Link bekommen? Öffne ihn einfach direkt – dafür brauchst du nichts zu installieren.</p></section>"#
     );
     page_html("DropCraft", &body)
@@ -720,7 +720,7 @@ fn password_page(token: &str, wrong: bool) -> Response {
 
 fn page_html(title: &str, main: &str) -> Response {
     let html = format!(
-        r#"<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+        r#"<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="robots" content="noindex"><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect width='20' height='20' rx='4' fill='%230b0e12'/%3E%3Cpath d='M10 2.5l6.5 3.75v7.5L10 17.5l-6.5-3.75v-7.5z M3.5 6.25L10 10l6.5-3.75M10 10v7.5' fill='none' stroke='%2319e3f0' stroke-width='1.4' stroke-linejoin='round'/%3E%3C/svg%3E"><title>{title} · DropCraft</title><style>{CSS}</style></head>
 <body><header><a class="brand" href="/">{ICON_CUBE}<span>DROPCRAFT</span></a></header>
 <main>{main}</main></body></html>"#
@@ -972,6 +972,7 @@ const ICON_CUBE: &str = r##"<svg width="22" height="22" viewBox="0 0 20 20" fill
 const ICON_FOLDER: &str = r##"<svg width="20" height="20" viewBox="0 0 16 16" fill="#0c5c64" stroke="#19e3f0" stroke-width="1.2" stroke-linejoin="round" aria-hidden="true"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg>"##;
 const ICON_FILE: &str = r##"<svg width="20" height="20" viewBox="0 0 16 16" fill="none" stroke="#95a2b0" stroke-width="1.2" stroke-linejoin="round" aria-hidden="true"><path d="M4 1.5h5l3 3v10H4z"/><path d="M9 1.5v3h3"/></svg>"##;
 const ICON_IMAGE: &str = r##"<svg width="20" height="20" viewBox="0 0 16 16" fill="none" stroke="#a084ff" stroke-width="1.2" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1"/><circle cx="6" cy="6.5" r="1"/><path d="M2.5 12l3.5-3.5 2.5 2.5 2-2 3 3"/></svg>"##;
+const ICON_EYE: &str = r##"<svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.2 8s2.5-4.8 6.8-4.8S14.8 8 14.8 8s-2.5 4.8-6.8 4.8S1.2 8 1.2 8z"/><circle cx="8" cy="8" r="2.2"/></svg>"##;
 const ICON_DOWNLOAD: &str = r##"<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5v8M5 7.5l3 3 3-3"/><path d="M2.5 10.5v3h11v-3"/></svg>"##;
 
 const ICON_UPLOAD_BIG: &str = r##"<svg width="34" height="34" viewBox="0 0 16 16" fill="none" stroke="#19e3f0" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 10.5V2.5M5 5.5l3-3 3 3"/><path d="M2.5 10.5v3h11v-3"/></svg>"##;
@@ -1008,6 +1009,7 @@ a.row:hover{background:#1a2028}
 .t-rem{font-size:15px;color:#95a2b0}.t-rem.warn{color:#fbbf24}
 .single .wave,.single .times{width:100%}
 .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.txt .name{flex:none}
 .btn{display:inline-flex;align-items:center;gap:6px;height:36px;min-width:36px;justify-content:center;padding:0 12px;border:1px solid #28303a;border-radius:4px;background:#1a2028;color:#e6ecf2;text-decoration:none;font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase}
 .btn:hover{background:#232b35;border-color:#0c5c64}
 .btn.primary{background:#19e3f0;border-color:#19e3f0;color:#0b0e12}.btn.primary:hover{background:#6ceef6}
@@ -1038,12 +1040,36 @@ audio.viewer-media{width:100%;margin:40px 16px}
 .btn.disabled{opacity:.35;pointer-events:none}
 .single-media{max-width:100%;max-height:60vh;border-radius:6px}
 .hero{display:flex;flex-direction:column;align-items:center;text-align:center;gap:12px;padding:56px 0}
+.hero .meta{white-space:normal}
 .hero h1{font-size:36px;margin:0}
 .lead{font-size:18px;color:#95a2b0;margin:0}
 .hero-actions{display:flex;flex-direction:column;align-items:center;gap:8px;margin:16px 0}
 .btn.big{height:48px;padding:0 20px;font-size:13px}
 .pw{display:flex;flex-direction:column;gap:12px;width:100%;max-width:320px;text-align:left}
-@media (max-width:560px){.row .meta{display:none}h1{font-size:22px}}
+.txt{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.txt .meta{font-size:12px;overflow:hidden;text-overflow:ellipsis}
+.btn.icon{width:40px;height:40px;padding:0;flex:0 0 auto}
+.touch{display:none}
+header{padding-top:max(12px,env(safe-area-inset-top));padding-left:max(20px,env(safe-area-inset-left));padding-right:max(20px,env(safe-area-inset-right))}
+main{padding-bottom:max(48px,env(safe-area-inset-bottom))}
+@media (hover:none){.desk{display:none}.touch{display:inline}a.row:hover{background:none}a.row:active,.btn:active{background:#232b35}}
+@media (max-width:560px){
+main{padding:16px 12px 40px}
+h1{font-size:21px;margin-bottom:12px}
+.row{gap:10px;padding:6px 8px 6px 10px;min-height:56px}
+.row .btn.icon{width:44px;height:44px}
+.bar .meta{flex:1 1 100%}.bar .btn{flex:1 1 100%;height:44px}
+.viewer-bar .meta{order:-1;flex:1 1 100%;text-align:center}
+.btn{white-space:nowrap}
+.drop-area{min-height:104px}
+.viewer{min-height:180px;border-radius:6px}
+.viewer-media{max-height:58vh}
+.viewer-bar .btn{flex:1 1 0;height:44px;padding:0 8px}
+.viewer-bar .btn.primary{flex:2 1 0}
+.t-pos{font-size:22px}
+.hero{padding:32px 0}.hero h1{font-size:30px}
+.single{padding:28px 12px}
+}
 "#;
 
 #[cfg(test)]
