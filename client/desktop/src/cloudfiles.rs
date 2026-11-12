@@ -80,6 +80,38 @@ pub struct CloudHooks {
     root: PathBuf,
     /// In diesem Programmlauf schon als synchron markiert.
     marked: Mutex<HashSet<PathBuf>>,
+    /// Gesetzt, wenn Windows den Ordner nicht (mehr) als Sync-Stamm kennt;
+    /// der Worker meldet ihn dann neu an.
+    broken: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    account_id: String,
+}
+
+/// Windows-Fehler „nur unter einem Cloudsynchronisierungsstamm“ (0x80070186).
+const ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT: i32 = 390;
+
+impl CloudHooks {
+    pub fn broken_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.broken.clone()
+    }
+
+    /// Macht aus einem Fehler eine verständliche Meldung und merkt sich,
+    /// dass die Anmeldung bei Windows fehlt.
+    fn check(&self, e: std::io::Error) -> std::io::Error {
+        if e.raw_os_error() != Some(ERROR_CLOUD_FILE_NOT_UNDER_SYNC_ROOT) {
+            return e;
+        }
+        self.broken.store(true, std::sync::atomic::Ordering::SeqCst);
+        let ours = root_id(&self.account_id).map(|i| i.to_os_string().to_string_lossy().into_owned()).unwrap_or_default();
+        let state = match cloud_filter::root::SyncRootId::from_path(&self.root) {
+            Ok(id) if id.to_os_string().to_string_lossy() == ours => "ist angemeldet, Windows lehnt die Datei trotzdem ab".to_string(),
+            Ok(id) => format!("gehört zu „{}“", id.to_os_string().to_string_lossy()),
+            Err(err) => format!("ist bei Windows nicht als Cloud-Ordner angemeldet ({err})"),
+        };
+        std::io::Error::new(
+            e.kind(),
+            format!("{} – „{}“ {state}. DropCraft meldet ihn neu an.", e, self.root.display()),
+        )
+    }
 }
 
 impl CloudHooks {
@@ -150,8 +182,8 @@ impl LocalHooks for CloudHooks {
 
     fn hydrate(&self, l: &Path) -> std::io::Result<bool> {
         // Blockiert, bis fetch_data (Provider) den ganzen Inhalt geliefert hat.
-        let mut ph = open_handle(l, false)?;
-        ph.hydrate(..).map_err(io_err)?;
+        let mut ph = open_handle(l, false).map_err(|e| self.check(e))?;
+        ph.hydrate(..).map_err(io_err).map_err(|e| self.check(e))?;
         Ok(true)
     }
 
@@ -339,7 +371,23 @@ pub fn connect(
     }
     let provider = Provider { root: root.to_path_buf(), api, progress, wake };
     let conn = Session::new().connect(root, provider).map_err(|e| format!("Verbindung fehlgeschlagen: {e}"))?;
-    let hooks = CloudHooks { root: root.to_path_buf(), marked: Mutex::new(HashSet::new()) };
+    let hooks = CloudHooks {
+        root: root.to_path_buf(),
+        marked: Mutex::new(HashSet::new()),
+        broken: Default::default(),
+        account_id: account_id.to_string(),
+    };
+    // Prüfen, ob Windows den Ordner jetzt wirklich als unseren Sync-Stamm kennt.
+    match cloud_filter::root::SyncRootId::from_path(root) {
+        Ok(found) if found.to_os_string() == id.to_os_string() => {}
+        Ok(found) => {
+            return Err(format!(
+                "Der Ordner ist bei Windows für „{}“ angemeldet, nicht für DropCraft. Bitte einen anderen Ordner wählen.",
+                found.to_os_string().to_string_lossy()
+            ))
+        }
+        Err(e) => return Err(format!("Windows hat den Ordner nicht als Cloud-Ordner übernommen: {e}")),
+    }
     // Der Sync-Ordner selbst bekommt ebenfalls den grünen Haken.
     if let Ok(mut ph) = open_handle(root, false) {
         let _ = ph.mark_in_sync(true, None);

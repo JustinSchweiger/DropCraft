@@ -99,22 +99,30 @@ pub fn spawn(cfg: Account, shared: SharedRef, repaint: egui::Context, pause_flag
 
             // Platzhalter statt vollständiger Downloads (Windows, optional).
             #[cfg(all(windows, feature = "cloud-files"))]
-            let _cloud = match crate::cloudfiles::connect(&cfg.id, &cfg.username, &cfg.sync_dir, api.clone(), engine.progress(), tx_self.clone()) {
-                Ok((hooks, root)) => {
-                    engine.set_hooks(Box::new(hooks));
-                    Some(root)
-                }
-                Err(e) => {
-                    shared.lock().unwrap().activity.push_front(Event {
-                        kind: dropcraft_core::EventKind::Error,
-                        path: "Cloud-Dateien".into(),
-                        detail: e,
-                        at: chrono::Local::now(),
-                        by: None,
-                    });
-                    None
+            let connect_cloud = |engine: &mut SyncEngine| -> (Option<crate::cloudfiles::CloudRoot>, Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) {
+                match crate::cloudfiles::connect(&cfg.id, &cfg.username, &cfg.sync_dir, api.clone(), engine.progress(), tx_self.clone()) {
+                    Ok((hooks, root)) => {
+                        let flag = hooks.broken_flag();
+                        engine.set_hooks(Box::new(hooks));
+                        (Some(root), Some(flag))
+                    }
+                    Err(e) => {
+                        shared.lock().unwrap().activity.push_front(Event {
+                            kind: dropcraft_core::EventKind::Error,
+                            path: "Cloud-Dateien".into(),
+                            detail: e,
+                            at: chrono::Local::now(),
+                            by: None,
+                        });
+                        repaint.request_repaint();
+                        (None, None)
+                    }
                 }
             };
+            #[cfg(all(windows, feature = "cloud-files"))]
+            let (mut _cloud, mut cloud_broken) = connect_cloud(&mut engine);
+            #[cfg(all(windows, feature = "cloud-files"))]
+            let mut last_reconnect: Option<std::time::Instant> = None;
 
             // Dateiänderungen beobachten.
             let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
@@ -137,6 +145,19 @@ pub fn spawn(cfg: Account, shared: SharedRef, repaint: egui::Context, pause_flag
 
             let is_paused = || pause_flag.load(std::sync::atomic::Ordering::SeqCst);
             loop {
+                // Windows kennt den Ordner nicht mehr als Cloud-Ordner: neu anmelden
+                // (höchstens alle 10 Minuten, damit es keine Schleife wird).
+                #[cfg(all(windows, feature = "cloud-files"))]
+                if cloud_broken.as_ref().map(|f| f.swap(false, std::sync::atomic::Ordering::SeqCst)).unwrap_or(false)
+                    && last_reconnect.map(|t| t.elapsed() > Duration::from_secs(600)).unwrap_or(true)
+                {
+                    last_reconnect = Some(std::time::Instant::now());
+                    drop(_cloud.take());
+                    (_cloud, cloud_broken) = connect_cloud(&mut engine);
+                    if _cloud.is_some() {
+                        let _ = tx_self.send(Cmd::SyncNow);
+                    }
+                }
                 if is_paused() {
                     set(Phase::Paused);
                     match rx.recv() {
