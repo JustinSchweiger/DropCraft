@@ -71,6 +71,49 @@ Jeder Account hat einen eigenen Ordner `data/users/<id>/blobs/` und ein eigenes 
 Die Datenbank merkt sich Pfade, Größe, SHA-256 und eine Revisionsnummer pro Datei.
 Gelöschte Dateien bleiben als „Grabstein“ in der Datenbank, damit andere Geräte die Löschung beim Sync mitbekommen.
 
+## Mac-App bauen und starten
+
+Voraussetzungen: Xcode (oder nur die Command Line Tools) und Rust (`curl https://sh.rustup.rs -sSf | sh`).
+
+```bash
+git clone https://github.com/JustinSchweiger/DropCraft.git && cd DropCraft
+bash client/desktop/macos/bundle.sh
+open client/target/release/DropCraft.app      # oder nach /Programme ziehen
+```
+
+- Die App lebt in der **Menüleiste** (kein Dock-Symbol). Klick aufs Symbol öffnet das Popup, Rechtsklick zeigt das Menü.
+- Kein Apple-Entwicklerkonto nötig: Das Skript signiert ad hoc. Selbst gebaut startet die App direkt.
+- Fertig gebaut: GitHub → Actions → letzter CI-Lauf → `DropCraft-macOS`. Beim ersten Start Rechtsklick → „Öffnen“
+  (oder `xattr -dr com.apple.quarantine DropCraft.app`).
+- „Bei der Anmeldung starten“ legt einen LaunchAgent an (`~/Library/LaunchAgents/tech.dropcraft.app.plist`).
+- Noch nicht auf dem Mac: Platzhalter-Dateien („Dateien bei Bedarf“) und der Finder-Rechtsklick. Bis dahin werden alle Dateien geladen.
+
+## iPhone-/iPad-App
+
+Native SwiftUI-App in `ios/`: Anmelden (mehrere Konten), Ordner durchblättern, Dateien öffnen (Vorschau),
+hochladen aus Fotos und Dateien, Links kopieren, Freigaben einstellen, Benutzerverwaltung für Admins.
+
+### Mit Xcode installieren (kostenlos, Apple-ID genügt)
+
+```bash
+brew install xcodegen
+cd ios && xcodegen generate && open DropCraft.xcodeproj
+```
+
+1. Xcode → Einstellungen → Accounts: Apple-ID hinzufügen.
+2. Ziel „DropCraft“ → Signing & Capabilities: Team = „(Personal Team)“. Meldet Xcode, dass die
+   Kennung vergeben ist, `tech.dropcraft.ios` durch etwas Eigenes ersetzen (z. B. `de.justin.dropcraft`).
+3. iPhone per Kabel anschließen, oben als Ziel wählen, ▶ drücken.
+4. Auf dem iPhone: Einstellungen → Allgemein → VPN und Geräteverwaltung → Entwickler vertrauen.
+   Ggf. zusätzlich Einstellungen → Datenschutz & Sicherheit → Entwicklermodus einschalten.
+
+Mit kostenloser Apple-ID läuft die Signatur nach **7 Tagen** ab (Daten bleiben erhalten): dann einfach erneut ▶.
+
+### Ohne Kabel erneuern: SideStore / AltStore / Sideloadly
+
+Die CI baut eine unsignierte `DropCraft.ipa` (GitHub → Actions → CI → `DropCraft-iOS`). Diese Werkzeuge
+signieren sie mit deiner Apple-ID und erneuern sie automatisch vor Ablauf der 7 Tage.
+
 ## Auf dem VPS installieren
 
 ```bash
