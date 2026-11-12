@@ -120,6 +120,17 @@ check "Ablauf in Vergangenheit" "$(J "${A[@]}" -X PATCH $B/shares/$TOK -d '{"exp
 check "abgelaufen" "$(code $S)" 410
 check "Ablauf entfernen" "$(J "${A[@]}" -X PATCH $B/shares/$TOK -d '{"expires_at":0}' | jq .expires_at)" null
 check "Startseite" "$(curl -s http://127.0.0.1:18080/ | grep -c 'Private Cloud')" 1
+# Web-App und signierte Links
+check "Web-App" "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/app/)" 200
+check "Web-App-Skript" "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/app/app.js)" 200
+check "Web-App ohne Pfadausbruch" "$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:18080/app/..%2FCargo.toml')" 404
+echo "signiert" > /tmp/sig.txt
+curl -s -o /dev/null "${A[@]}" -X PUT --data-binary @/tmp/sig.txt "$B/files/upload?path=sig.txt"
+DL=$(curl -s "${A[@]}" "$B/files/link?path=sig.txt" | jq -r .url)
+check "Signierter Link" "$(curl -s "http://127.0.0.1:18080$DL")" "signiert"
+check "Link ohne Anmeldung nicht erstellbar" "$(curl -s -o /dev/null -w '%{http_code}' "$B/files/link?path=sig.txt")" 401
+check "Gefälschte Signatur" "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:18080${DL/s=/s=0}")" 403
+check "Anderer Pfad mit Signatur" "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:18080${DL/sig.txt/x.txt}")" 403
 check "kein App-Download ohne Datei" "$(code http://127.0.0.1:18080/download/windows)" 404
 
 check "Anna kann Justins Freigabe nicht löschen" "$(code "${Bh[@]}" -X DELETE $B/shares/$TOK)" 404
