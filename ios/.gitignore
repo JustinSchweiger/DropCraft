@@ -1,0 +1,4 @@
+DropCraft.xcodeproj/
+build/
+*.ipa
+Payload/
