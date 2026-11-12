@@ -36,19 +36,24 @@ struct DropCraftApp: App {
 
 struct RootView: View {
     @EnvironmentObject var model: AppModel
+    // Start-Tab; für automatische Bildschirmfotos per Umgebungsvariable wählbar
+    @State private var tab = Int(ProcessInfo.processInfo.environment["DC_TAB"] ?? "") ?? 0
 
     var body: some View {
         Group {
             if model.selected == nil {
                 LoginView(isFirst: true)
             } else {
-                TabView {
+                TabView(selection: $tab) {
                     FilesRoot()
                         .tabItem { Label("Dateien", systemImage: "folder") }
+                        .tag(0)
                     SharesView()
                         .tabItem { Label("Freigaben", systemImage: "link") }
+                        .tag(1)
                     AccountView()
                         .tabItem { Label("Konto", systemImage: "person.crop.circle") }
+                        .tag(2)
                 }
                 .id(model.selectedID)
                 .task(id: model.selectedID) { await model.refreshMe() }

@@ -58,6 +58,13 @@ final class AppModel: ObservableObject {
         }
         selectedID = UserDefaults.standard.string(forKey: selectedKey) ?? accounts.first?.id
         if selected == nil { selectedID = accounts.first?.id }
+        #if DEBUG
+        // Für automatische Tests: DC_AUTOLOGIN="server|benutzer|passwort"
+        if let auto = ProcessInfo.processInfo.environment["DC_AUTOLOGIN"], accounts.isEmpty {
+            let p = auto.split(separator: "|").map(String.init)
+            if p.count == 3 { Task { try? await login(server: p[0], username: p[1], password: p[2]) } }
+        }
+        #endif
     }
 
     var selected: Account? { accounts.first { $0.id == selectedID } }

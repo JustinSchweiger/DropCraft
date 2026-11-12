@@ -1,0 +1,57 @@
+name: iOS-Bildschirmfotos
+
+on:
+  workflow_dispatch:
+
+jobs:
+  screens:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server -> target
+      - name: Server starten
+        working-directory: server
+        run: |
+          cargo build --release
+          export DROPCRAFT_DATA=$RUNNER_TEMP/data DROPCRAFT_BIND=127.0.0.1:18080
+          DROPCRAFT_PASSWORD=sehrgeheim123 ./target/release/dropcraft-server adduser justin 100 --admin
+          DROPCRAFT_PASSWORD=sehrgeheim456 ./target/release/dropcraft-server adduser mama 20
+          nohup ./target/release/dropcraft-server > $RUNNER_TEMP/server.log 2>&1 &
+          sleep 2
+          B=http://127.0.0.1:18080/api
+          T=$(curl -s $B/auth/login -H 'content-type: application/json' -d '{"username":"justin","password":"sehrgeheim123","device_name":"CI"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+          A="Authorization: Bearer $T"
+          head -c 3000000 /dev/urandom > /tmp/Intro.mp4; head -c 200000 /dev/urandom > /tmp/Foto.jpg; echo hallo > /tmp/Setlist.txt
+          curl -s -X POST -H "$A" -H 'content-type: application/json' $B/files/mkdir -d '{"path":"Bandprobe 2026"}'
+          curl -s -X POST -H "$A" -H 'content-type: application/json' $B/files/mkdir -d '{"path":"Fotos"}'
+          for f in Intro.mp4 Foto.jpg Setlist.txt; do curl -s -X PUT -H "$A" --data-binary @/tmp/$f "$B/files/upload?path=$f" >/dev/null; done
+          S=$(curl -s -X POST -H "$A" -H 'content-type: application/json' $B/shares -d '{"path":"Bandprobe 2026"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+          curl -s -X PATCH -H "$A" -H 'content-type: application/json' $B/shares/$S -d '{"allow_upload":true,"expires_at":'$(( ($(date +%s)+7*86400)*1000 ))'}'
+          curl -s -X POST -H "$A" -H 'content-type: application/json' $B/shares -d '{"path":"Foto.jpg"}' >/dev/null
+      - name: App für den Simulator bauen
+        working-directory: ios
+        run: |
+          brew install xcodegen
+          xcodegen generate
+          xcodebuild -project DropCraft.xcodeproj -scheme DropCraft -configuration Debug -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' -derivedDataPath build CODE_SIGNING_ALLOWED=NO build | tail -n 20
+      - name: Bildschirmfotos
+        working-directory: ios
+        run: |
+          DEV=$(xcrun simctl list devices available | grep -E "iPhone 1[5-9]|iPhone 2" | head -1 | sed -E 's/.*\(([0-9A-F-]{36})\).*/\1/')
+          xcrun simctl boot "$DEV"; sleep 15
+          xcrun simctl install "$DEV" build/Build/Products/Debug-iphonesimulator/DropCraft.app
+          mkdir -p shots
+          for t in 0 1 2; do
+            SIMCTL_CHILD_DC_AUTOLOGIN="http://127.0.0.1:18080|justin|sehrgeheim123" SIMCTL_CHILD_DC_TAB=$t xcrun simctl launch "$DEV" tech.dropcraft.ios
+            sleep 8
+            xcrun simctl io "$DEV" screenshot shots/tab$t.png
+            xcrun simctl terminate "$DEV" tech.dropcraft.ios
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-screens
+          path: ios/shots
