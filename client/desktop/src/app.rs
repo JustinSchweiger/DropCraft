@@ -308,6 +308,8 @@ impl App {
         let ctx = cc.egui_ctx.clone();
         let win = tray::WindowHandle::default();
         win.set_from(cc);
+        #[cfg(target_os = "macos")]
+        tray::mac::accessory();
 
         let cfg = Config::load();
         let bw = BandwidthRef::default();
@@ -1019,9 +1021,9 @@ impl App {
             });
         }
         section_label(ui, "Allgemein", None);
-        if cfg!(windows) {
+        if cfg!(any(windows, target_os = "macos")) {
             let mut v = self.cfg.autostart;
-            setting_row(ui, "Mit Windows starten", None, |ui| {
+            setting_row(ui, if cfg!(windows) { "Mit Windows starten" } else { "Bei der Anmeldung starten" }, None, |ui| {
                 if toggle(ui, &mut v).changed() {
                     changed = true;
                 }

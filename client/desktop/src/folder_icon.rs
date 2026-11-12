@@ -17,8 +17,24 @@ pub fn apply(dir: &Path) {
     }
     #[cfg(windows)]
     apply_windows(dir, &ico);
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    apply_macos(dir);
+    #[cfg(not(any(windows, target_os = "macos")))]
     let _ = dir;
+}
+
+/// Finder: Symbol über NSWorkspace setzen.
+#[cfg(target_os = "macos")]
+fn apply_macos(dir: &Path) {
+    use objc2::AllocAnyThread;
+    use objc2_app_kit::{NSImage, NSWorkspace, NSWorkspaceIconCreationOptions};
+    use objc2_foundation::{NSData, NSString};
+    let png = crate::icons::png_bytes(&folder_rgba(512), 512);
+    let data = NSData::with_bytes(&png);
+    let Some(img) = NSImage::initWithData(NSImage::alloc(), &data) else { return };
+    let path = NSString::from_str(&dir.display().to_string());
+    let ws = NSWorkspace::sharedWorkspace();
+    let _ = ws.setIcon_forFile_options(Some(&img), &path, NSWorkspaceIconCreationOptions(0));
 }
 
 #[cfg(windows)]

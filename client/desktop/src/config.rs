@@ -185,7 +185,38 @@ pub fn set_autostart(enabled: bool) {
     }
 }
 
-#[cfg(not(windows))]
+/// „Bei der Anmeldung starten“ über einen LaunchAgent.
+#[cfg(target_os = "macos")]
+pub fn set_autostart(enabled: bool) {
+    let Some(home) = dirs::home_dir() else { return };
+    let plist = home.join("Library/LaunchAgents/tech.dropcraft.app.plist");
+    if !enabled {
+        let _ = std::fs::remove_file(plist);
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else { return };
+    let esc = |s: String| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>tech.dropcraft.app</string>
+  <key>ProgramArguments</key><array><string>{}</string><string>--autostart</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>ProcessType</key><string>Interactive</string>
+</dict>
+</plist>
+"#,
+        esc(exe.display().to_string())
+    );
+    if let Some(parent) = plist.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(plist, xml);
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn set_autostart(_enabled: bool) {}
 
 /// Explorer-Rechtsklick „DropCraft-Link kopieren“ für Dateien und Ordner in

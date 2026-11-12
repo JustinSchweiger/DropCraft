@@ -43,7 +43,13 @@ impl WindowHandle {
                 round_corners(h.hwnd.get());
             }
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        if let Ok(h) = w.window_handle() {
+            if let raw_window_handle::RawWindowHandle::AppKit(h) = h.as_raw() {
+                self.hwnd.store(h.ns_view.as_ptr() as isize, Ordering::SeqCst);
+            }
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
         let _ = w;
     }
 
@@ -78,6 +84,19 @@ impl WindowHandle {
                 return;
             }
         }
+        #[cfg(target_os = "macos")]
+        {
+            let view = self.hwnd.load(Ordering::SeqCst);
+            if view != 0 {
+                let ctx2 = ctx.clone();
+                let near_mouse = anchor.is_some();
+                mac::on_main(move || {
+                    mac::show(view, near_mouse);
+                    ctx2.request_repaint();
+                });
+                return;
+            }
+        }
         let _ = anchor;
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -98,7 +117,80 @@ impl WindowHandle {
                 return;
             }
         }
+        #[cfg(target_os = "macos")]
+        {
+            let view = self.hwnd.load(Ordering::SeqCst);
+            if view != 0 {
+                mac::on_main(move || mac::hide(view));
+                return;
+            }
+        }
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+    }
+}
+
+/// macOS: Fenster direkt über AppKit zeigen/verstecken (wie Win32 unter
+/// Windows), Menüleisten-Symbol auf dem Hauptthread.
+#[cfg(target_os = "macos")]
+pub mod mac {
+    use objc2::{rc::Retained, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEvent, NSScreen, NSView, NSWindow};
+    use objc2_foundation::NSPoint;
+
+    /// Führt `f` auf dem Hauptthread aus (sofort, wenn wir schon dort sind).
+    pub fn on_main(f: impl FnOnce() + Send + 'static) {
+        if MainThreadMarker::new().is_some() {
+            f();
+        } else {
+            dispatch::Queue::main().exec_async(f);
+        }
+    }
+
+    fn window(view: isize) -> Option<Retained<NSWindow>> {
+        if view == 0 || MainThreadMarker::new().is_none() {
+            return None;
+        }
+        // SAFETY: Zeiger stammt aus dem AppKit-Fensterhandle von winit und
+        // lebt so lange wie das Fenster (die ganze Laufzeit der App).
+        let view: &NSView = unsafe { &*(view as *const NSView) };
+        view.window()
+    }
+
+    /// Kein Dock-Symbol, nur Menüleiste.
+    pub fn accessory() {
+        if let Some(mtm) = MainThreadMarker::new() {
+            NSApplication::sharedApplication(mtm).setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+        }
+    }
+
+    /// Popup unter der Menüleiste zeigen: unter dem Mauszeiger (Klick aufs
+    /// Symbol) oder oben rechts.
+    pub fn show(view: isize, near_mouse: bool) {
+        let Some(mtm) = MainThreadMarker::new() else { return };
+        let Some(win) = window(view) else { return };
+        let mouse = NSEvent::mouseLocation();
+        let inside = |s: &NSScreen| {
+            let f = s.frame();
+            mouse.x >= f.origin.x && mouse.x <= f.origin.x + f.size.width && mouse.y >= f.origin.y && mouse.y <= f.origin.y + f.size.height
+        };
+        let screen = NSScreen::screens(mtm).iter().find(|s| inside(s)).or_else(|| NSScreen::mainScreen(mtm));
+        if let Some(s) = screen {
+            let vf = s.visibleFrame();
+            let w = win.frame().size.width;
+            let (min_x, max_x) = (vf.origin.x + 8.0, vf.origin.x + vf.size.width - w - 8.0);
+            let x = if near_mouse { (mouse.x - w / 2.0).clamp(min_x, max_x.max(min_x)) } else { max_x };
+            win.setFrameTopLeftPoint(NSPoint::new(x, vf.origin.y + vf.size.height - 6.0));
+        }
+        let app = NSApplication::sharedApplication(mtm);
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
+        win.makeKeyAndOrderFront(None);
+    }
+
+    pub fn hide(view: isize) {
+        if let Some(win) = window(view) {
+            win.orderOut(None);
+        }
     }
 }
 
@@ -223,6 +315,7 @@ pub fn tray_rgba(state: TrayState, frame: u32) -> Vec<u8> {
 /// Startet das Taskleisten-Symbol in einem eigenen Thread mit eigener
 /// Nachrichtenschleife. So kann es sich drehen und reagieren, auch wenn das
 /// Popup versteckt ist (dann läuft egui nicht).
+#[cfg(not(target_os = "macos"))]
 pub fn spawn(
     status: impl Fn() -> TrayStatus + Send + 'static,
     win: WindowHandle,
@@ -290,6 +383,85 @@ pub fn spawn(
     });
 }
 
+#[cfg(target_os = "macos")]
+thread_local! {
+    static MAC_TRAY: std::cell::RefCell<Option<(tray_icon::TrayIcon, MenuItem)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// macOS: Das Menüleisten-Symbol muss auf dem Hauptthread entstehen (hier:
+/// beim Start der App). Ein Hilfsthread berechnet den Zustand und schickt
+/// Änderungen an den Hauptthread.
+#[cfg(target_os = "macos")]
+pub fn spawn(
+    status: impl Fn() -> TrayStatus + Send + 'static,
+    win: WindowHandle,
+    ctx: egui::Context,
+    on_pause: impl Fn() + Send + Sync + 'static,
+    on_quit: impl Fn() + Send + Sync + 'static,
+) {
+    let open = MenuItem::new("DropCraft öffnen", true, None);
+    let pause = MenuItem::new("Pausieren", true, None);
+    let quit = MenuItem::new("Beenden", true, None);
+    let menu = Menu::new();
+    if menu.append_items(&[&open, &pause, &PredefinedMenuItem::separator(), &quit]).is_err() {
+        return;
+    }
+    let ids = TrayIds { open: open.id().clone(), pause: pause.id().clone(), quit: quit.id().clone() };
+    install_handlers(ids, win, ctx, on_pause, on_quit);
+    let Some(icon) = tray_icon::Icon::from_rgba(tray_rgba(TrayState::Idle, 0), 32, 32).ok() else { return };
+    let Ok(tray) = TrayIconBuilder::new()
+        .with_tooltip("DropCraft")
+        .with_icon(icon)
+        .with_menu(Box::new(menu))
+        .with_menu_on_left_click(false)
+        .build()
+    else {
+        return;
+    };
+    MAC_TRAY.with(|t| *t.borrow_mut() = Some((tray, pause)));
+
+    let _ = std::thread::Builder::new().name("tray".into()).spawn(move || {
+        let mut shown = (TrayState::Idle, 0u32);
+        let mut frame = 0u32;
+        let mut tooltip = String::new();
+        let mut pause_label = "";
+        loop {
+            std::thread::sleep(Duration::from_millis(125));
+            let st = status();
+            let f = if st.state == TrayState::Syncing {
+                frame = (frame + 1) % 8;
+                frame
+            } else {
+                0
+            };
+            let new_icon = ((st.state, f) != shown).then(|| tray_rgba(st.state, f));
+            shown = (st.state, f);
+            let new_tip = (st.tooltip != tooltip).then(|| st.tooltip.clone());
+            tooltip = st.tooltip;
+            let new_label = (st.pause_label != pause_label).then_some(st.pause_label);
+            pause_label = st.pause_label;
+            if new_icon.is_none() && new_tip.is_none() && new_label.is_none() {
+                continue;
+            }
+            dispatch::Queue::main().exec_async(move || {
+                MAC_TRAY.with(|t| {
+                    if let Some((tray, pause)) = &*t.borrow() {
+                        if let Some(px) = new_icon {
+                            let _ = tray.set_icon(tray_icon::Icon::from_rgba(px, 32, 32).ok());
+                        }
+                        if let Some(tip) = new_tip {
+                            let _ = tray.set_tooltip(Some(&tip));
+                        }
+                        if let Some(l) = new_label {
+                            pause.set_text(l);
+                        }
+                    }
+                });
+            });
+        }
+    });
+}
+
 struct TrayIds {
     open: MenuId,
     pause: MenuId,
@@ -338,7 +510,7 @@ fn pump_messages(timeout_ms: u32) {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn pump_messages(timeout_ms: u32) {
     std::thread::sleep(Duration::from_millis(timeout_ms as u64));
 }

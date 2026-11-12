@@ -55,3 +55,24 @@ jobs:
         with:
           name: DropCraft-${{ matrix.variant }}
           path: client/target/release/DropCraft.exe
+
+  macos:
+    name: macOS-App
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client -> target
+      - name: App-Bundle bauen
+        run: bash client/desktop/macos/bundle.sh
+      - name: Tests
+        working-directory: client
+        run: cargo test --release -p dropcraft-desktop
+      - name: Zippen
+        run: ditto -c -k --keepParent client/target/release/DropCraft.app DropCraft-macOS.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DropCraft-macOS
+          path: DropCraft-macOS.zip

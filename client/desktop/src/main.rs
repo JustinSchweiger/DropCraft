@@ -24,6 +24,13 @@ const INSTANCE_PORT: u16 = 47819;
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
+    // Für das macOS-Bundle: `DropCraft --export-iconset <Ordner>.iconset`
+    if let Some(dir) = args.iter().position(|a| a == "--export-iconset").and_then(|i| args.get(i + 1)) {
+        if let Err(e) = icons::export_iconset(std::path::Path::new(dir)) {
+            eprintln!("{e}");
+        }
+        return Ok(());
+    }
     let autostart = args.iter().any(|a| a == "--autostart");
     let share = args.iter().position(|a| a == "--share").and_then(|i| args.get(i + 1)).map(std::path::PathBuf::from);
     let listener = match TcpListener::bind(("127.0.0.1", INSTANCE_PORT)) {
@@ -41,8 +48,8 @@ fn main() -> eframe::Result {
 
     let icon = egui::IconData { rgba: icons::logo_rgba(64), width: 64, height: 64 };
     let options = eframe::NativeOptions {
-        // Unter Windows ein rahmenloses Popup über der Taskleiste, das erst
-        // beim Klick aufs Tray-Symbol erscheint.
+        // Unter Windows ein rahmenloses Popup über der Taskleiste (unter
+        // macOS unter der Menüleiste), das erst beim Klick aufs Symbol erscheint.
         viewport: egui::ViewportBuilder::default()
             .with_title("DropCraft")
             .with_inner_size([380.0, 600.0])
