@@ -32,6 +32,12 @@ fi
 
 mkdir -p data/public && chown 10001:10001 data data/public
 
+# n8n braucht einen festen Schlüssel; nur beim allerersten Mal erzeugen.
+if ! grep -q '^N8N_ENCRYPTION_KEY=.\+' .env; then
+  echo "N8N_ENCRYPTION_KEY=$(openssl rand -hex 32)" >> .env
+  echo "==> Neuer n8n-Schlüssel in deploy/.env angelegt (bitte sicher aufbewahren)"
+fi
+
 echo "==> Baue und starte den Server neu (dauert ein paar Minuten) ..."
 docker compose up -d --build
 docker compose restart caddy >/dev/null

@@ -14,3 +14,9 @@
 		-Server
 	}
 }
+
+# n8n (eigene Subdomain, DNS-A-Eintrag auf den Server nötig)
+{$N8N_DOMAIN:n8n.dropcraft.tech} {
+	reverse_proxy n8n:5678
+	header -Server
+}

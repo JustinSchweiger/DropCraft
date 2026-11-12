@@ -71,6 +71,13 @@ Jeder Account hat einen eigenen Ordner `data/users/<id>/blobs/` und ein eigenes 
 Die Datenbank merkt sich Pfade, Größe, SHA-256 und eine Revisionsnummer pro Datei.
 Gelöschte Dateien bleiben als „Grabstein“ in der Datenbank, damit andere Geräte die Löschung beim Sync mitbekommen.
 
+## n8n auf demselben Server
+
+`deploy/docker-compose.yml` startet zusätzlich n8n unter `https://n8n.dropcraft.tech` (anderer Name: `N8N_DOMAIN=…` in `deploy/.env`).
+Voraussetzung: DNS-A-Eintrag `n8n` auf die Server-IP. Der Schlüssel `N8N_ENCRYPTION_KEY` steht in `deploy/.env`,
+wird beim ersten Update automatisch erzeugt und darf danach nie geändert werden (sonst sind gespeicherte Zugangsdaten unlesbar).
+Update von n8n: `cd /opt/dropcraft/deploy && docker compose pull n8n && docker compose up -d n8n`.
+
 ## Mac-App bauen und starten
 
 Voraussetzungen: Xcode (oder nur die Command Line Tools) und Rust (`curl https://sh.rustup.rs -sSf | sh`).

@@ -22,7 +22,27 @@ services:
       - caddy_config:/config
     depends_on:
       - dropcraft
+      - n8n
+
+  # Workflow-Automatisierung unter https://n8n.dropcraft.tech
+  # (Schlüssel N8N_ENCRYPTION_KEY steht in .env und darf sich nie ändern)
+  n8n:
+    image: docker.n8n.io/n8nio/n8n
+    restart: unless-stopped
+    environment:
+      - N8N_HOST=${N8N_DOMAIN:-n8n.dropcraft.tech}
+      - N8N_PROTOCOL=https
+      - WEBHOOK_URL=https://${N8N_DOMAIN:-n8n.dropcraft.tech}/
+      - N8N_PROXY_HOPS=1
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      - GENERIC_TIMEZONE=Europe/Berlin
+      - TZ=Europe/Berlin
+    volumes:
+      - n8n_data:/home/node/.n8n
+    expose:
+      - "5678"
 
 volumes:
   caddy_data:
   caddy_config:
+  n8n_data:
