@@ -42,7 +42,11 @@ struct SharesView: View {
     }
 
     private func load() async {
-        guard let api = model.api else { return }
+        guard let api = model.api else {
+            loading = false
+            model.needsLogin = true
+            return
+        }
         do { shares = try await api.shares() } catch { model.report(error) }
         loading = false
     }

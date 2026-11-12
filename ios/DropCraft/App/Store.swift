@@ -13,8 +13,15 @@ enum Keychain {
         var add = query
         add[kSecValueData as String] = Data(token.utf8)
         add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-        SecItemAdd(add as CFDictionary, nil)
+        if SecItemAdd(add as CFDictionary, nil) == errSecSuccess {
+            UserDefaults.standard.removeObject(forKey: fallbackKey(id))
+        } else {
+            // Ohne Schlüsselbund-Berechtigung (unsignierte Builds): Ersatzablage
+            UserDefaults.standard.set(token, forKey: fallbackKey(id))
+        }
     }
+
+    private static func fallbackKey(_ id: String) -> String { "token." + id }
 
     static func get(_ id: String) -> String? {
         let query: [String: Any] = [
@@ -22,13 +29,16 @@ enum Keychain {
             kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne,
         ]
         var out: AnyObject?
-        guard SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess, let data = out as? Data else { return nil }
+        guard SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess, let data = out as? Data else {
+            return UserDefaults.standard.string(forKey: fallbackKey(id))
+        }
         return String(data: data, encoding: .utf8)
     }
 
     static func delete(_ id: String) {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: id]
         SecItemDelete(query as CFDictionary)
+        UserDefaults.standard.removeObject(forKey: fallbackKey(id))
     }
 }
 

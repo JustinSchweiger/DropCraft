@@ -5,7 +5,8 @@ import UniformTypeIdentifiers
 
 /// Dateien-Tab: Ordner durchblättern, hochladen, teilen.
 struct FilesRoot: View {
-    @State private var path: [String] = []
+    // Startordner; für automatische Bildschirmfotos per Umgebungsvariable
+    @State private var path: [String] = ProcessInfo.processInfo.environment["DC_PATH"].map { [$0] } ?? []
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -173,7 +174,11 @@ struct FolderView: View {
     // MARK: Aktionen
 
     private func load() async {
-        guard let api = model.api else { return }
+        guard let api = model.api else {
+            loading = false
+            model.needsLogin = true
+            return
+        }
         do {
             items = try await api.list(dir)
             loadError = nil

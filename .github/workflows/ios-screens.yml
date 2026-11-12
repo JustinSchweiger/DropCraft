@@ -34,13 +34,14 @@ jobs:
           S=$(curl -s -X POST -H "$A" -H 'content-type: application/json' $B/shares -d '{"path":"Bandprobe 2026"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
           curl -s -X PATCH -H "$A" -H 'content-type: application/json' $B/shares/$S -d '{"allow_upload":true,"expires_at":'$(( ($(date +%s)+7*86400)*1000 ))'}'
           curl -s -X POST -H "$A" -H 'content-type: application/json' $B/shares -d '{"path":"Foto.jpg"}' >/dev/null
+          for f in Intro.mp4 Setlist.txt; do curl -s -X PUT -H "$A" --data-binary @/tmp/$f "$B/files/upload?path=Bandprobe%202026/$f" >/dev/null; done
       - name: App für den Simulator bauen
         working-directory: ios
         run: |
           brew install xcodegen
           xcodegen generate
           xcodebuild -project DropCraft.xcodeproj -scheme DropCraft -configuration Debug -sdk iphonesimulator \
-            -destination 'generic/platform=iOS Simulator' -derivedDataPath build CODE_SIGNING_ALLOWED=NO build | tail -n 20
+            -destination 'generic/platform=iOS Simulator' -derivedDataPath build CODE_SIGN_IDENTITY=- build | tail -n 20
       - name: Bildschirmfotos
         working-directory: ios
         run: |
@@ -48,12 +49,16 @@ jobs:
           xcrun simctl boot "$DEV"; sleep 15
           xcrun simctl install "$DEV" build/Build/Products/Debug-iphonesimulator/DropCraft.app
           mkdir -p shots
-          for t in 0 1 2; do
-            SIMCTL_CHILD_DC_AUTOLOGIN="http://127.0.0.1:18080|justin|sehrgeheim123" SIMCTL_CHILD_DC_TAB=$t xcrun simctl launch "$DEV" tech.dropcraft.ios
+          shot() {
+            SIMCTL_CHILD_DC_AUTOLOGIN="http://127.0.0.1:18080|justin|sehrgeheim123" SIMCTL_CHILD_DC_TAB=$2 SIMCTL_CHILD_DC_PATH="$3" xcrun simctl launch "$DEV" tech.dropcraft.ios
             sleep 8
-            xcrun simctl io "$DEV" screenshot shots/tab$t.png
+            xcrun simctl io "$DEV" screenshot shots/$1.png
             xcrun simctl terminate "$DEV" tech.dropcraft.ios
-          done
+          }
+          shot tab0 0 ""
+          shot tab1 1 ""
+          shot tab2 2 ""
+          shot folder 0 "Bandprobe 2026"
       - uses: actions/upload-artifact@v4
         with:
           name: ios-screens
