@@ -18,8 +18,10 @@ struct SharesView: View {
                                 Button { copy(sh) } label: { Label("Kopieren", systemImage: "doc.on.doc") }.tint(DC.accentDim)
                             }
                     }
-                } header: {
-                    if !shares.isEmpty { SectionLabel("\(shares.count) \(shares.count == 1 ? "aktiver Link" : "aktive Links")") }
+                } footer: {
+                    if !shares.isEmpty {
+                        Text("\(shares.count) \(shares.count == 1 ? "aktiver Link" : "aktive Links")").font(.footnote).foregroundStyle(DC.dim)
+                    }
                 }
             }
             .listStyle(.insetGrouped)
