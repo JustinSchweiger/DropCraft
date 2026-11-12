@@ -3,6 +3,9 @@ name: iOS-Bildschirmfotos
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   screens:
     runs-on: macos-latest
@@ -55,3 +58,10 @@ jobs:
         with:
           name: ios-screens
           path: ios/shots
+      - name: Fotos in Zweig „screens“ ablegen
+        run: |
+          cd ios/shots
+          git init -q && git checkout -q -b screens
+          git config user.name ci && git config user.email ci@users.noreply.github.com
+          git add . && git commit -qm "iOS-Bildschirmfotos"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" screens
