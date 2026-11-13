@@ -120,7 +120,7 @@ fn two_devices_stay_in_sync() {
         let pb = b.engine.progress();
         let pb = pb.lock().unwrap();
         assert_eq!(pb.bytes_down, 300_005, "heruntergeladene Bytes");
-        assert!(pb.queue.is_empty() && pb.current.is_none());
+        assert!(pb.queue.is_empty() && pb.active.is_empty());
     }
     assert_eq!(read(&rb, "Dokumente/Brief.txt").unwrap(), b"Hallo");
     assert_eq!(read(&rb, "Fotos/2026/bild.jpg").unwrap().len(), 300_000);

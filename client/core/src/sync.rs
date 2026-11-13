@@ -11,10 +11,14 @@
 //! ebenfalls hochgeladen, die Server-Version landet unter dem Originalnamen.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     io::Read,
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Mutex,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -96,6 +100,119 @@ pub fn is_ignored(name: &str) -> bool {
 /// Dateien, die gerade erst geändert wurden, warten bis sie „ruhig“ sind.
 const SETTLE_MS: i64 = 2000;
 
+/// So viele Dateien werden gleichzeitig hoch- bzw. heruntergeladen.
+pub const PARALLEL: usize = 4;
+
+/// Arbeitet `jobs` mit bis zu `n` Threads ab. `done` läuft auf dem
+/// aufrufenden Thread, sobald ein Ergebnis da ist; gibt es `true` zurück
+/// (schwerer Fehler), werden keine neuen Aufträge mehr begonnen.
+fn parallel<J: Send, R: Send>(jobs: Vec<J>, n: usize, work: impl Fn(&J) -> R + Sync, mut done: impl FnMut(J, R) -> bool) {
+    if jobs.is_empty() {
+        return;
+    }
+    let threads = n.max(1).min(jobs.len());
+    let queue = Mutex::new(jobs.into_iter().collect::<VecDeque<_>>());
+    let stop = AtomicBool::new(false);
+    let (tx, rx) = mpsc::channel::<(J, R)>();
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            let tx = tx.clone();
+            let (queue, stop, work) = (&queue, &stop, &work);
+            scope.spawn(move || loop {
+                if stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                let Some(job) = queue.lock().unwrap().pop_front() else { break };
+                let r = work(&job);
+                if tx.send((job, r)).is_err() {
+                    break;
+                }
+            });
+        }
+        drop(tx);
+        for (job, r) in rx {
+            if done(job, r) {
+                stop.store(true, Ordering::SeqCst);
+            }
+        }
+    });
+}
+
+/// Rückruf für eine Übertragung: Fortschritt, Bandbreite, Abbruch.
+fn transfer_cb(prog: &ProgressRef, bw: &BandwidthRef, pause: &PauseFlag, id: u64, upload: bool) -> impl Fn(u64) -> std::io::Result<()> + Send + 'static {
+    let (prog, bw, pause) = (prog.clone(), bw.clone(), pause.clone());
+    move |n| {
+        if pause.load(Ordering::SeqCst) {
+            return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "Pausiert"));
+        }
+        if upload {
+            bw.up.take(n);
+        } else {
+            bw.down.take(n);
+        }
+        progress::advance(&prog, id, n);
+        Ok(())
+    }
+}
+
+/// Lädt eine Datei vom Server (Teil, der parallel laufen darf).
+fn fetch_file(api: &Api, prog: &ProgressRef, bw: &BandwidthRef, pause: &PauseFlag, e: &RemoteEntry, local: &Path) -> Result<(), SyncError> {
+    let parent = local.parent().ok_or_else(|| std::io::Error::other("Ungültiger Pfad"))?.to_path_buf();
+    fs::create_dir_all(&parent)?;
+    let tmp = parent.join(format!(".dropcraft-{}.tmp", uuid::Uuid::new_v4()));
+    let id = progress::start(prog, &e.path, false, e.size as u64);
+    let res = (|| -> Result<(), SyncError> {
+        let cb = transfer_cb(prog, bw, pause, id, false);
+        api.download_with_progress(&e.path, &tmp, &mut |n| cb(n))?;
+        if let Some(expected) = &e.sha256 {
+            let got = hash_file(&tmp)?;
+            if &got != expected {
+                return Err(SyncError::Io(std::io::Error::other("Prüfsumme stimmt nicht")));
+            }
+        }
+        let ft = filetime::FileTime::from_unix_time(e.modified_at / 1000, ((e.modified_at % 1000) * 1_000_000) as u32);
+        let _ = filetime::set_file_mtime(&tmp, ft);
+        fs::rename(&tmp, local)?;
+        Ok(())
+    })();
+    progress::finish(prog, id, res.is_ok());
+    if res.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    res
+}
+
+/// Ergebnis eines Upload-Auftrags.
+enum Pushed {
+    /// Nur die Änderungszeit hatte sich geändert (gleicher Inhalt).
+    Touched,
+    Uploaded(RemoteEntry),
+}
+
+struct UploadJob {
+    path: String,
+    local: PathBuf,
+    item: LocalItem,
+    st: Option<Synced>,
+}
+
+/// Lädt eine Datei hoch (Teil, der parallel laufen darf).
+fn send_file(api: &Api, prog: &ProgressRef, bw: &BandwidthRef, pause: &PauseFlag, j: &UploadJob) -> Result<Pushed, SyncError> {
+    // Schon beim Prüfen als laufende Datei anzeigen.
+    let id = progress::start(prog, &j.path, true, j.item.size as u64);
+    let res = (|| {
+        let sha = hash_file(&j.local)?;
+        if j.st.as_ref().and_then(|s| s.sha256.as_deref()) == Some(sha.as_str()) {
+            return Ok(Pushed::Touched);
+        }
+        let base_rev = j.st.as_ref().map(|s| s.rev).unwrap_or(0);
+        let r = api.upload_with_progress(&j.path, &j.local, j.item.mtime, base_rev, transfer_cb(prog, bw, pause, id, true))?;
+        Ok(Pushed::Uploaded(r))
+    })();
+    progress::finish(prog, id, matches!(res, Ok(Pushed::Uploaded(_))));
+    res
+}
+
 #[derive(Debug, Clone)]
 struct LocalItem {
     is_dir: bool,
@@ -148,23 +265,6 @@ impl SyncEngine {
         }
     }
 
-    /// Rückruf für Übertragungen: Fortschritt, Bandbreite, Abbruch.
-    fn transfer_cb(&self, upload: bool) -> impl Fn(u64) -> std::io::Result<()> + Send + 'static {
-        let (prog, bw, pause) = (self.progress.clone(), self.bandwidth.clone(), self.pause.clone());
-        move |n| {
-            if pause.load(std::sync::atomic::Ordering::SeqCst) {
-                return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "Pausiert"));
-            }
-            if upload {
-                bw.up.take(n);
-            } else {
-                bw.down.take(n);
-            }
-            progress::advance(&prog, n);
-            Ok(())
-        }
-    }
-
     /// Platzhalter-Unterstützung einschalten (siehe [`LocalHooks`]).
     pub fn set_hooks(&mut self, hooks: Box<dyn LocalHooks>) {
         self.hooks = hooks;
@@ -187,13 +287,7 @@ impl SyncEngine {
     /// Fehler bei einzelnen Dateien werden als Ereignis gemeldet.
     pub fn sync_once(&mut self) -> Result<Report, SyncError> {
         self.report = Report::default();
-        {
-            let mut p = self.progress.lock().unwrap();
-            p.queue.clear();
-            p.current = None;
-            p.files_done = 0;
-            p.events.clear();
-        }
+        self.progress.lock().unwrap().reset_round();
         if !self.root.is_dir() {
             return Err(SyncError::RootMissing(self.root.display().to_string()));
         }
@@ -211,7 +305,7 @@ impl SyncEngine {
         {
             let mut p = self.progress.lock().unwrap();
             p.queue.clear();
-            p.current = None;
+            p.active.clear();
         }
         Ok(std::mem::take(&mut self.report))
     }
@@ -227,19 +321,27 @@ impl SyncEngine {
                     progress::enqueue(&self.progress, &e.path, false, e.size as u64);
                 }
             }
+            // Erst alles Schnelle (Ordner, Löschungen, Platzhalter) der Reihe
+            // nach, die eigentlichen Downloads danach parallel.
+            let mut downloads: Vec<(RemoteEntry, PathBuf)> = Vec::new();
             for e in &changes.entries {
                 self.check_pause()?;
                 let res = self.apply_remote(e);
-                progress::drop_queued(&self.progress, &e.path, false);
                 match res {
-                    Ok(()) => {}
+                    Ok(Some(local)) => {
+                        downloads.push((e.clone(), local));
+                        continue;
+                    }
+                    Ok(None) => {}
                     Err(SyncError::Paused) => return Err(SyncError::Paused),
                     Err(SyncError::Api(err @ (ApiError::Network(_) | ApiError::Unauthorized))) => {
                         return Err(err.into())
                     }
                     Err(err) => self.event(EventKind::Error, &e.path, err.to_string()),
                 }
+                progress::drop_queued(&self.progress, &e.path, false);
             }
+            self.download_many(downloads, true)?;
             self.state.set_cursor(changes.cursor)?;
             if !changes.has_more {
                 return Ok(());
@@ -247,7 +349,9 @@ impl SyncEngine {
         }
     }
 
-    fn apply_remote(&mut self, e: &RemoteEntry) -> Result<(), SyncError> {
+    /// Wendet eine Server-Änderung an. Muss die Datei heruntergeladen werden,
+    /// kommt ihr lokaler Pfad zurück (der Download läuft danach parallel).
+    fn apply_remote(&mut self, e: &RemoteEntry) -> Result<Option<PathBuf>, SyncError> {
         let local = self.local_path(&e.path);
         let st = self.state.get(&e.path);
 
@@ -272,7 +376,7 @@ impl SyncEngine {
                 }
                 self.state.remove_tree(&e.path)?;
             }
-            return Ok(());
+            return Ok(None);
         }
 
         if e.is_dir {
@@ -289,13 +393,13 @@ impl SyncEngine {
                 size: 0,
                 local_mtime: 0,
             })?;
-            return Ok(());
+            return Ok(None);
         }
 
         // Datei
         if let Some(s) = &st {
             if s.rev == e.rev && local.is_file() {
-                return Ok(()); // schon aktuell (z. B. eigener Upload)
+                return Ok(None); // schon aktuell (z. B. eigener Upload)
             }
         }
         match fs::symlink_metadata(&local) {
@@ -309,7 +413,7 @@ impl SyncEngine {
                 if self.hooks.is_online_only(&local) {
                     if !self.hooks.wants_local(&local) && self.hooks.update_placeholder(&local, e)? {
                         self.remember_file(e, &local)?;
-                        return Ok(());
+                        return Ok(None);
                     }
                 } else {
                     let unchanged = st.as_ref().map(|s| local_unchanged(s, &m)).unwrap_or(false);
@@ -317,7 +421,7 @@ impl SyncEngine {
                         // Unveränderte Datei, die nicht angepinnt ist: nicht neu
                         // laden, sondern zum Platzhalter der neuen Version machen.
                         self.remember_file(e, &local)?;
-                        return Ok(());
+                        return Ok(None);
                     }
                     if !unchanged {
                         let sha = hash_file(&local)?;
@@ -325,7 +429,7 @@ impl SyncEngine {
                             // Gleicher Inhalt auf beiden Seiten: nur merken.
                             self.remember_file(e, &local)?;
                             self.hooks.mark_synced(&local, false);
-                            return Ok(());
+                            return Ok(None);
                         }
                         let local_is_last_synced = st.as_ref().and_then(|s| s.sha256.as_ref()) == Some(&sha);
                         if !local_is_last_synced {
@@ -344,43 +448,55 @@ impl SyncEngine {
                     if self.hooks.create_placeholder(&local, e)? {
                         self.remember_file(e, &local)?;
                         self.event_by(EventKind::NewOnline, &e.path, human_size(e.size), e.modified_by.clone());
-                        return Ok(());
+                        return Ok(None);
                     }
                 }
             }
         }
-        self.download(e, &local)?;
-        self.event_by(EventKind::Downloaded, &e.path, human_size(e.size), e.modified_by.clone());
-        Ok(())
+        Ok(Some(local))
     }
 
-    fn download(&mut self, e: &RemoteEntry, local: &Path) -> Result<(), SyncError> {
-        let parent = local.parent().unwrap_or(&self.root).to_path_buf();
-        fs::create_dir_all(&parent)?;
-        let tmp = parent.join(format!(".dropcraft-{}.tmp", uuid::Uuid::new_v4()));
-        progress::start(&self.progress, &e.path, false, e.size as u64);
-        let res = (|| -> Result<(), SyncError> {
-            let cb = self.transfer_cb(false);
-            self.api.download_with_progress(&e.path, &tmp, &mut |n| cb(n))?;
-            if let Some(expected) = &e.sha256 {
-                let got = hash_file(&tmp)?;
-                if &got != expected {
-                    return Err(SyncError::Io(std::io::Error::other("Prüfsumme stimmt nicht")));
+    /// Lädt mehrere Dateien parallel herunter und trägt sie danach ein.
+    /// `announce`: „heruntergeladen“-Ereignis melden.
+    fn download_many(&mut self, jobs: Vec<(RemoteEntry, PathBuf)>, announce: bool) -> Result<(), SyncError> {
+        let (api, prog, bw, pause) = (self.api.clone(), self.progress.clone(), self.bandwidth.clone(), self.pause.clone());
+        let mut fatal: Option<SyncError> = None;
+        parallel(
+            jobs,
+            PARALLEL,
+            |(e, local)| fetch_file(&api, &prog, &bw, &pause, e, local),
+            |(e, local), res| {
+                progress::drop_queued(&self.progress, &e.path, false);
+                let res = res.and_then(|_| {
+                    self.hooks.mark_synced(&local, false);
+                    self.remember_file(&e, &local)
+                });
+                match res {
+                    Ok(()) => {
+                        if announce {
+                            self.event_by(EventKind::Downloaded, &e.path, human_size(e.size), e.modified_by.clone());
+                        }
+                        false
+                    }
+                    Err(_) if self.pause.load(Ordering::SeqCst) => {
+                        fatal = Some(SyncError::Paused);
+                        true
+                    }
+                    Err(SyncError::Api(err @ (ApiError::Network(_) | ApiError::Unauthorized))) => {
+                        fatal.get_or_insert(SyncError::Api(err));
+                        true
+                    }
+                    Err(err) => {
+                        self.event(EventKind::Error, &e.path, err.to_string());
+                        false
+                    }
                 }
-            }
-            let ft = filetime::FileTime::from_unix_time(e.modified_at / 1000, ((e.modified_at % 1000) * 1_000_000) as u32);
-            let _ = filetime::set_file_mtime(&tmp, ft);
-            fs::rename(&tmp, local)?;
-            Ok(())
-        })();
-        progress::finish(&self.progress, res.is_ok());
-        if res.is_err() {
-            let _ = fs::remove_file(&tmp);
-            self.check_pause()?;
+            },
+        );
+        match fatal {
+            Some(e) => Err(e),
+            None => Ok(()),
         }
-        res?;
-        self.hooks.mark_synced(local, false);
-        self.remember_file(e, local)
     }
 
     fn remember_file(&mut self, e: &RemoteEntry, local: &Path) -> Result<(), SyncError> {
@@ -439,6 +555,7 @@ impl SyncEngine {
                 progress::enqueue(&self.progress, path, true, item.size as u64);
             }
         }
+        let mut uploads: Vec<UploadJob> = Vec::new();
         for (path, item) in &local {
             self.check_pause()?;
             let st = self.state.get(path);
@@ -466,17 +583,15 @@ impl SyncEngine {
                     continue; // wird vermutlich gerade noch geschrieben
                 }
                 let needed = item.size - st.as_ref().map(|s| s.size).unwrap_or(0);
-                let r = if needed > free {
+                if needed > free {
+                    progress::drop_queued(&self.progress, path, true);
                     Err(SyncError::Api(ApiError::QuotaExceeded))
                 } else {
-                    let r = self.upload(path, item, st.as_ref());
-                    if r.is_ok() {
-                        free -= needed;
-                    }
-                    r
-                };
-                progress::drop_queued(&self.progress, path, true);
-                r
+                    // Platz vormerken; hochgeladen wird gleich parallel.
+                    free -= needed;
+                    uploads.push(UploadJob { path: path.clone(), local: self.local_path(path), item: item.clone(), st });
+                    continue;
+                }
             };
             match res {
                 Ok(()) => {}
@@ -488,58 +603,70 @@ impl SyncEngine {
                 Err(e) => self.event(EventKind::Error, path, e.to_string()),
             }
         }
-        Ok(())
+        self.upload_many(uploads)
     }
 
-    fn upload(&mut self, path: &str, item: &LocalItem, st: Option<&Synced>) -> Result<(), SyncError> {
-        let local = self.local_path(path);
-        // Schon beim Prüfen als „aktuelle Datei“ anzeigen.
-        progress::start(&self.progress, path, true, item.size as u64);
-        let sha = match hash_file(&local) {
-            Ok(s) => s,
-            Err(e) => {
-                progress::finish(&self.progress, false);
-                return Err(e.into());
-            }
-        };
-        if let Some(s) = st {
-            if s.sha256.as_deref() == Some(sha.as_str()) {
-                // Nur die Änderungszeit hat sich geändert.
-                progress::finish(&self.progress, false);
-                self.state.put(&Synced { local_mtime: item.mtime, ..s.clone() })?;
-                return Ok(());
-            }
-        }
-        let base_rev = st.map(|s| s.rev).unwrap_or(0);
-        let result = self.api.upload_with_progress(path, &local, item.mtime, base_rev, self.transfer_cb(true));
-        progress::finish(&self.progress, result.is_ok());
-        if result.is_err() {
-            self.check_pause()?;
-        }
-        match result {
-            Ok(r) => {
-                // Den Stand vom Scan merken. Hat sich die Datei während des
-                // Uploads geändert, erkennt der nächste Scan das und lädt neu.
-                self.state.put(&Synced {
-                    path: r.path.clone(),
-                    is_dir: false,
-                    rev: r.rev,
-                    sha256: r.sha256.clone(),
-                    size: item.size,
-                    local_mtime: item.mtime,
-                })?;
-                self.report.uploaded += 1;
-                self.hooks.mark_synced(&local, false);
-                self.event(EventKind::Uploaded, path, human_size(r.size));
-                Ok(())
-            }
-            Err(ApiError::Conflict(_)) => {
-                // Server hat eine neuere Version: lokale als Kopie sichern,
-                // die nächste Runde holt die Server-Version.
-                self.move_to_conflict(path)?;
-                Ok(())
-            }
-            Err(e) => Err(e.into()),
+    /// Lädt mehrere Dateien parallel hoch und trägt die Ergebnisse ein.
+    fn upload_many(&mut self, jobs: Vec<UploadJob>) -> Result<(), SyncError> {
+        let (api, prog, bw, pause) = (self.api.clone(), self.progress.clone(), self.bandwidth.clone(), self.pause.clone());
+        let mut fatal: Option<SyncError> = None;
+        parallel(
+            jobs,
+            PARALLEL,
+            |j| send_file(&api, &prog, &bw, &pause, j),
+            |j, res| {
+                progress::drop_queued(&self.progress, &j.path, true);
+                let res = match res {
+                    Ok(Pushed::Touched) => match &j.st {
+                        Some(s) => self.state.put(&Synced { local_mtime: j.item.mtime, ..s.clone() }).map_err(Into::into),
+                        None => Ok(()),
+                    },
+                    Ok(Pushed::Uploaded(r)) => {
+                        // Den Stand vom Scan merken. Hat sich die Datei während des
+                        // Uploads geändert, erkennt der nächste Scan das und lädt neu.
+                        let put = self.state.put(&Synced {
+                            path: r.path.clone(),
+                            is_dir: false,
+                            rev: r.rev,
+                            sha256: r.sha256.clone(),
+                            size: j.item.size,
+                            local_mtime: j.item.mtime,
+                        });
+                        put.map_err(SyncError::from).map(|_| {
+                            self.report.uploaded += 1;
+                            self.hooks.mark_synced(&j.local, false);
+                            self.event(EventKind::Uploaded, &j.path, human_size(r.size));
+                        })
+                    }
+                    // Server hat eine neuere Version: lokale als Kopie sichern,
+                    // die nächste Runde holt die Server-Version.
+                    Err(SyncError::Api(ApiError::Conflict(_))) => self.move_to_conflict(&j.path),
+                    Err(e) => Err(e),
+                };
+                match res {
+                    Ok(()) => false,
+                    Err(_) if self.pause.load(Ordering::SeqCst) => {
+                        fatal = Some(SyncError::Paused);
+                        true
+                    }
+                    Err(SyncError::Api(err @ (ApiError::Network(_) | ApiError::Unauthorized))) => {
+                        fatal.get_or_insert(SyncError::Api(err));
+                        true
+                    }
+                    Err(SyncError::Api(ApiError::QuotaExceeded)) => {
+                        self.event(EventKind::Error, &j.path, "Speicherplatz voll".into());
+                        false
+                    }
+                    Err(e) => {
+                        self.event(EventKind::Error, &j.path, e.to_string());
+                        false
+                    }
+                }
+            },
+        );
+        match fatal {
+            Some(e) => Err(e),
+            None => Ok(()),
         }
     }
 
@@ -547,6 +674,8 @@ impl SyncEngine {
 
     /// Angepinnte Platzhalter herunterladen, freigegebene Dateien leeren.
     fn availability(&mut self) -> Result<(), SyncError> {
+        // Angepinnte Platzhalter: werden am Ende parallel gefüllt.
+        let mut pinned: Vec<(Synced, PathBuf)> = Vec::new();
         for s in self.state.all()? {
             let local = self.local_path(&s.path);
             if s.is_dir {
@@ -560,43 +689,8 @@ impl SyncEngine {
             }
             let online_only = self.hooks.is_online_only(&local);
             if online_only && self.hooks.wants_local(&local) {
-                let e = RemoteEntry {
-                    path: s.path.clone(),
-                    is_dir: false,
-                    size: s.size,
-                    sha256: s.sha256.clone(),
-                    modified_at: 0,
-                    rev: s.rev,
-                    deleted: false,
-                    modified_by: None,
-                };
-                // Erst an Ort und Stelle füllen (Windows ruft dafür den Provider auf).
-                match self.hooks.hydrate(&local) {
-                    Ok(true) => {
-                        self.hooks.mark_synced(&local, false);
-                        if let Ok(m) = fs::metadata(&local) {
-                            self.state.put(&Synced { local_mtime: mtime_ms(&m), ..s.clone() })?;
-                        }
-                        self.event(EventKind::Downloaded, &s.path, human_size(s.size));
-                        continue;
-                    }
-                    Ok(false) => {}
-                    Err(err) => {
-                        self.check_pause()?;
-                        self.event(EventKind::Error, &s.path, format!("Herunterladen: {err}"));
-                        continue;
-                    }
-                }
                 progress::enqueue(&self.progress, &s.path, false, s.size as u64);
-                let modified = fs::metadata(&local).ok().map(|m| mtime_ms(&m)).unwrap_or(0);
-                let res = self.download(&RemoteEntry { modified_at: modified, ..e }, &local);
-                progress::drop_queued(&self.progress, &s.path, false);
-                match res {
-                    Ok(()) => self.event(EventKind::Downloaded, &s.path, human_size(s.size)),
-                    Err(SyncError::Paused) => return Err(SyncError::Paused),
-                    Err(SyncError::Api(err @ (ApiError::Network(_) | ApiError::Unauthorized))) => return Err(err.into()),
-                    Err(err) => self.event(EventKind::Error, &s.path, err.to_string()),
-                }
+                pinned.push((s, local));
             } else if online_only {
                 self.hooks.check_synced(&local, false);
             } else if fs::metadata(&local).map(|m| local_unchanged(&s, &m)).unwrap_or(false) && !self.hooks.wants_free(&local) {
@@ -615,7 +709,64 @@ impl SyncEngine {
                 }
             }
         }
-        Ok(())
+        self.fill_pinned(pinned)
+    }
+
+    /// Angepinnte Platzhalter parallel füllen: an Ort und Stelle (Windows ruft
+    /// dafür den Provider auf), sonst klassisch herunterladen.
+    fn fill_pinned(&mut self, pinned: Vec<(Synced, PathBuf)>) -> Result<(), SyncError> {
+        if pinned.is_empty() {
+            return Ok(());
+        }
+        // Hooks kurz herausnehmen, damit die Threads sie gemeinsam nutzen können.
+        let hooks = std::mem::replace(&mut self.hooks, Box::new(FullDownload));
+        let mut fallback: Vec<(RemoteEntry, PathBuf)> = Vec::new();
+        let mut fatal: Option<SyncError> = None;
+        parallel(
+            pinned,
+            PARALLEL,
+            |(_, local)| hooks.hydrate(local),
+            |(s, local), res| match res {
+                Ok(true) => {
+                    progress::drop_queued(&self.progress, &s.path, false);
+                    hooks.mark_synced(&local, false);
+                    if let Ok(m) = fs::metadata(&local) {
+                        let _ = self.state.put(&Synced { local_mtime: mtime_ms(&m), ..s.clone() });
+                    }
+                    self.event(EventKind::Downloaded, &s.path, human_size(s.size));
+                    false
+                }
+                Ok(false) => {
+                    let modified = fs::metadata(&local).ok().map(|m| mtime_ms(&m)).unwrap_or(0);
+                    let e = RemoteEntry {
+                        path: s.path.clone(),
+                        is_dir: false,
+                        size: s.size,
+                        sha256: s.sha256.clone(),
+                        modified_at: modified,
+                        rev: s.rev,
+                        deleted: false,
+                        modified_by: None,
+                    };
+                    fallback.push((e, local));
+                    false
+                }
+                Err(err) => {
+                    progress::drop_queued(&self.progress, &s.path, false);
+                    if self.pause.load(Ordering::SeqCst) {
+                        fatal = Some(SyncError::Paused);
+                        return true;
+                    }
+                    self.event(EventKind::Error, &s.path, format!("Herunterladen: {err}"));
+                    false
+                }
+            },
+        );
+        self.hooks = hooks;
+        if let Some(e) = fatal {
+            return Err(e);
+        }
+        self.download_many(fallback, true)
     }
 
     // ------------------------------------------------------------ helpers
@@ -778,6 +929,37 @@ mod tests {
         assert!(is_ignored("desktop.ini"));
         assert!(is_ignored(".dropcraft-123.tmp"));
         assert!(!is_ignored("Bericht.docx"));
+    }
+
+    #[test]
+    fn parallel_runs_concurrently_and_stops_on_fatal() {
+        use std::sync::atomic::AtomicUsize;
+        let (now, max) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let mut seen = 0;
+        parallel(
+            (0..12).collect(),
+            PARALLEL,
+            |_| {
+                let n = now.fetch_add(1, Ordering::SeqCst) + 1;
+                max.fetch_max(n, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                now.fetch_sub(1, Ordering::SeqCst);
+            },
+            |_, _| {
+                seen += 1;
+                false
+            },
+        );
+        assert_eq!(seen, 12);
+        assert_eq!(max.load(Ordering::SeqCst), PARALLEL);
+
+        // Schwerer Fehler: keine neuen Aufträge, laufende werden noch gemeldet.
+        let mut seen = 0;
+        parallel((0..40).collect::<Vec<i32>>(), 2, |_| std::thread::sleep(std::time::Duration::from_millis(5)), |_, _| {
+            seen += 1;
+            true
+        });
+        assert!(seen < 40, "nach dem Fehler wurde weitergemacht: {seen}");
     }
 
     #[test]

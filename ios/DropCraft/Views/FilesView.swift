@@ -279,6 +279,7 @@ struct FolderView: View {
 
     private func uploadFiles(_ urls: [URL]) async {
         var taken = Set(items.map { $0.name.lowercased() })
+        var ready: [(URL, String)] = []
         for url in urls {
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
@@ -291,20 +292,39 @@ struct FolderView: View {
                 model.report(error)
                 continue
             }
-            await upload(tmp, name: freeName(url.lastPathComponent, taken: &taken))
+            ready.append((tmp, freeName(url.lastPathComponent, taken: &taken)))
+        }
+        await uploadParallel(ready)
+    }
+
+    /// Bis zu drei Dateien gleichzeitig hochladen.
+    private func uploadParallel(_ files: [(URL, String)]) async {
+        var pending = files[...]
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<min(3, pending.count) {
+                let (f, n) = pending.removeFirst()
+                group.addTask { await upload(f, name: n) }
+            }
+            while await group.next() != nil {
+                if let (f, n) = pending.popFirst() {
+                    group.addTask { await upload(f, name: n) }
+                }
+            }
         }
     }
 
     private func uploadPhotos(_ picked: [PhotosPickerItem]) async {
         var taken = Set(items.map { $0.name.lowercased() })
+        var ready: [(URL, String)] = []
         for item in picked {
             do {
                 guard let media = try await item.loadTransferable(type: PickedMedia.self) else { continue }
-                await upload(media.url, name: freeName(media.url.lastPathComponent, taken: &taken))
+                ready.append((media.url, freeName(media.url.lastPathComponent, taken: &taken)))
             } catch {
                 model.report(error)
             }
         }
+        await uploadParallel(ready)
     }
 
     private func upload(_ file: URL, name: String) async {

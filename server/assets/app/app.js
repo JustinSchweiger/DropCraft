@@ -440,14 +440,20 @@
     const jobs = files.map((f) => ({ id: ++xferId, name: freeName(f.name, taken), up: true, p: 0, file: f }));
     state.transfers.push(...jobs);
     if (currentDir === dir) route();
-    for (const j of jobs) {
-      try {
-        await uploadOne(dir, j);
-      } catch (e) {
-        fail(e);
+    // Bis zu drei Dateien gleichzeitig
+    const queue = jobs.slice();
+    const worker = async () => {
+      for (let j = queue.shift(); j; j = queue.shift()) {
+        try {
+          await uploadOne(dir, j);
+        } catch (e) {
+          fail(e);
+        }
+        state.transfers = state.transfers.filter((t) => t.id !== j.id);
+        document.querySelector(`.xfer[data-id="${j.id}"]`)?.remove();
       }
-      state.transfers = state.transfers.filter((t) => t.id !== j.id);
-    }
+    };
+    await Promise.all(Array.from({ length: Math.min(3, jobs.length) }, worker));
     if (currentDir === dir) route();
     toast(jobs.length === 1 ? `„${jobs[0].name}“ hochgeladen` : `${jobs.length} Dateien hochgeladen`);
   }

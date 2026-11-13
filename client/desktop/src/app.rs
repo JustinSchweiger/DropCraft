@@ -1421,8 +1421,12 @@ fn transfer_panel(ui: &mut egui::Ui, p: &Progress, speed: f64) {
     );
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
-        let dir = p.current.as_ref().map(|c| c.upload).unwrap_or(true);
-        paint_small(ui, if dir { Icon::Up } else { Icon::Down });
+        if p.uploading() || !p.downloading() {
+            paint_small(ui, Icon::Up);
+        }
+        if p.downloading() {
+            paint_small(ui, Icon::Down);
+        }
         ui.label(RichText::new(if speed > 1.0 { format!("{}/s", human_size(speed as i64)) } else { "–".into() }).size(10.5).color(TEXT_DIM));
         ui.add_space(10.0);
         paint_small(ui, Icon::Clock);
@@ -1430,18 +1434,20 @@ fn transfer_panel(ui: &mut egui::Ui, p: &Progress, speed: f64) {
         ui.label(RichText::new(rest).size(10.5).color(TEXT_DIM));
     });
     ui.add_space(2.0);
-    if let Some(c) = &p.current {
+    // Laufende Übertragungen (mehrere gleichzeitig), dann die Warteschlange.
+    for c in &p.active {
         let frac = if c.total > 0 { (c.done as f32 / c.total as f32).clamp(0.0, 1.0) } else { 1.0 };
         let name = c.path.rsplit('/').next().unwrap_or(&c.path);
         let detail = if c.done == 0 && c.upload { "wird geprüft".to_string() } else { format!("{} / {}", human_size(c.done as i64), human_size(c.total as i64)) };
         transfer_row(ui, name, &c.path, &detail, frac, c.upload);
     }
-    for q in p.queue.iter().take(2) {
+    let shown_queue = 4usize.saturating_sub(p.active.len()).max(1);
+    for q in p.queue.iter().take(shown_queue) {
         let name = q.path.rsplit('/').next().unwrap_or(&q.path);
         transfer_row(ui, name, &q.path, &human_size(q.size as i64), 0.0, q.upload);
     }
-    if p.queue.len() > 2 {
-        ui.label(RichText::new(format!("und {} weitere", p.queue.len() - 2)).size(10.5).color(TEXT_DIM));
+    if p.queue.len() > shown_queue {
+        ui.label(RichText::new(format!("und {} weitere", p.queue.len() - shown_queue)).size(10.5).color(TEXT_DIM));
     }
 }
 

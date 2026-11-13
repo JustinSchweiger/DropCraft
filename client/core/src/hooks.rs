@@ -7,7 +7,7 @@ use std::path::Path;
 
 use crate::api::RemoteEntry;
 
-pub trait LocalHooks: Send {
+pub trait LocalHooks: Send + Sync {
     /// Ist die Datei nur als Platzhalter ohne Inhalt vorhanden?
     fn is_online_only(&self, _local: &Path) -> bool {
         false

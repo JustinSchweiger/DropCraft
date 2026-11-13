@@ -278,12 +278,12 @@ impl SyncFilter for Provider {
             return Ok(());
         }
 
-        progress::start(&self.progress, &remote, false, end - start);
+        let pid = progress::start(&self.progress, &remote, false, end - start);
         let mut buf: Vec<u8> = Vec::with_capacity(1 << 20);
         let mut written = start;
         let res = self.api.download_range(&remote, start, end - start, &mut |_, chunk| {
             buf.extend_from_slice(chunk);
-            progress::advance(&self.progress, chunk.len() as u64);
+            progress::advance(&self.progress, pid, chunk.len() as u64);
             if buf.len() >= 1 << 20 {
                 let n = buf.len() & !4095;
                 ticket.write_at(&buf[..n], written).map_err(io_err)?;
@@ -299,7 +299,7 @@ impl SyncFilter for Provider {
             }
             Ok(())
         });
-        progress::finish(&self.progress, res.is_ok());
+        progress::finish(&self.progress, pid, res.is_ok());
         match res {
             Ok(()) => Ok(()),
             Err(e) => {
