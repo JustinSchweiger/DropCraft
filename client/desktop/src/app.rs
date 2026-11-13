@@ -771,7 +771,7 @@ impl App {
                 sh.used,
                 sh.quota,
                 sh.last_sync,
-                sh.activity.iter().take(50).cloned().collect::<Vec<_>>(),
+                sh.activity.iter().take(100).cloned().collect::<Vec<_>>(),
                 sh.progress.as_ref().map(|p| p.lock().unwrap().clone()),
             )
         };
@@ -781,7 +781,7 @@ impl App {
             .unwrap_or_default()
             .into_iter()
             .chain(activity)
-            .take(50)
+            .take(100)
             .collect();
         let paused = rt.paused.load(Ordering::SeqCst);
         let speed = progress.as_ref().map(|p| rt.speed.update(p.bytes_total())).unwrap_or(0.0);
@@ -834,8 +834,8 @@ impl App {
         });
         let list_h = (full.bottom() - quota_h - ui.cursor().top()).max(40.0);
         egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
-            for ev in &activity {
-                activity_row(ui, ev);
+            for group in group_activity(&activity) {
+                activity_row(ui, &group);
             }
         });
 
@@ -1858,8 +1858,25 @@ fn footer_band(ui: &mut egui::Ui, h: f32, add: impl FnOnce(&mut egui::Ui)) {
     add(&mut child);
 }
 
-fn activity_row(ui: &mut egui::Ui, ev: &dropcraft_core::Event) {
-    let (icon, color, verb) = match ev.kind {
+/// Fasst Ereignisse derselben Datei zusammen (neuestes zuerst). Die Reihenfolge
+/// richtet sich nach dem jeweils neuesten Ereignis.
+fn group_activity(events: &[dropcraft_core::Event]) -> Vec<Vec<&dropcraft_core::Event>> {
+    let mut groups: Vec<Vec<&dropcraft_core::Event>> = Vec::new();
+    let mut index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for ev in events {
+        match index.get(ev.path.as_str()) {
+            Some(&i) => groups[i].push(ev),
+            None => {
+                index.insert(ev.path.as_str(), groups.len());
+                groups.push(vec![ev]);
+            }
+        }
+    }
+    groups
+}
+
+fn event_style(kind: EventKind) -> (Icon, Color32, &'static str) {
+    match kind {
         EventKind::Uploaded => (Icon::Up, ACCENT, "hochgeladen"),
         EventKind::Downloaded => (Icon::Down, OK, "heruntergeladen"),
         EventKind::NewOnline => (Icon::Cloud, TEXT_DIM, "nur online"),
@@ -1867,7 +1884,21 @@ fn activity_row(ui: &mut egui::Ui, ev: &dropcraft_core::Event) {
         EventKind::DeletedRemote => (Icon::Trash, TEXT_DIM, "gelöscht"),
         EventKind::Conflict => (Icon::Warning, WARN, "Konflikt"),
         EventKind::Error => (Icon::Warning, DANGER, "Fehler"),
-    };
+    }
+}
+
+fn event_time(ev: &dropcraft_core::Event) -> String {
+    if ev.at.date_naive() == chrono::Local::now().date_naive() {
+        ev.at.format("%H:%M").to_string()
+    } else {
+        ev.at.format("%d.%m. %H:%M").to_string()
+    }
+}
+
+/// Eine Zeile pro Datei; mehrere Änderungen zeigt der Hover-Text einzeln.
+fn activity_row(ui: &mut egui::Ui, group: &[&dropcraft_core::Event]) {
+    let ev = group[0];
+    let (icon, color, verb) = event_style(ev.kind);
     let name = ev.path.rsplit('/').next().unwrap_or(&ev.path);
     let when = if ev.at.date_naive() == chrono::Local::now().date_naive() { ev.at.format("%H:%M").to_string() } else { ev.at.format("%d.%m.").to_string() };
     let who = match &ev.by {
@@ -1875,12 +1906,16 @@ fn activity_row(ui: &mut egui::Ui, ev: &dropcraft_core::Event) {
         _ => verb.to_string(),
     };
     let detail = format!("{who} · {when}");
-    let mut hover = format!("{}\n{verb}", ev.path);
-    if !ev.detail.is_empty() {
-        hover.push_str(&format!(" · {}", ev.detail));
-    }
-    if let Some(by) = &ev.by {
-        hover.push_str(&format!(" · von {by}"));
+    let mut hover = ev.path.clone();
+    for e in group {
+        let (_, _, v) = event_style(e.kind);
+        hover.push_str(&format!("\n{}  {v}", event_time(e)));
+        if !e.detail.is_empty() {
+            hover.push_str(&format!(" · {}", e.detail));
+        }
+        if let Some(by) = &e.by {
+            hover.push_str(&format!(" · von {by}"));
+        }
     }
     let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 40.0), Sense::hover());
     let _ = resp.on_hover_text(hover);
@@ -1889,8 +1924,16 @@ fn activity_row(ui: &mut egui::Ui, ev: &dropcraft_core::Event) {
     paint_icon_at(p, Rect::from_center_size(Pos2::new(r.left() + 19.0, r.center().y), Vec2::splat(14.0)), icon, color);
     let dg = p.layout_no_wrap(detail, egui::FontId::proportional(10.5), TEXT_DIM);
     let dw = dg.size().x;
-    let dx = r.right() - 12.0 - dw;
+    let mut dx = r.right() - 12.0 - dw;
     p.galley(Pos2::new(dx, r.center().y - dg.size().y / 2.0), dg, TEXT_DIM);
+    // Mehrere Änderungen: kleines Zähl-Etikett vor der Zeit
+    if group.len() > 1 {
+        let cg = p.layout_no_wrap(format!("{}×", group.len()), egui::FontId::proportional(10.5), TEXT_DIM);
+        let badge = Rect::from_center_size(Pos2::new(dx - 8.0 - (cg.size().x + 10.0) / 2.0, r.center().y), Vec2::new(cg.size().x + 10.0, 16.0));
+        p.rect_filled(badge, 4.0, RAISED);
+        p.galley(Pos2::new(badge.left() + 5.0, badge.center().y - cg.size().y / 2.0), cg, TEXT_DIM);
+        dx = badge.left();
+    }
     let tx = r.left() + 36.0;
     let clip = p.with_clip_rect(Rect::from_min_max(Pos2::new(tx, r.top()), Pos2::new(dx - 10.0, r.bottom())));
     clip.text(Pos2::new(tx, r.center().y), egui::Align2::LEFT_CENTER, name, egui::FontId::proportional(13.0), TEXT);
