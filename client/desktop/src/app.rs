@@ -92,6 +92,14 @@ impl Controls {
     }
 
     /// Gesamtzustand für das Taskleisten-Symbol.
+    /// Keine Übertragung läuft (gut für einen Neustart nach Update).
+    fn idle(&self) -> bool {
+        self.0.lock().unwrap().iter().all(|c| {
+            let sh = c.shared.lock().unwrap();
+            sh.progress.as_ref().map(|p| !p.lock().unwrap().is_active()).unwrap_or(true)
+        })
+    }
+
     fn tray_status(&self) -> tray::TrayStatus {
         let list = self.0.lock().unwrap();
         let multi = list.len() > 1;
@@ -300,6 +308,7 @@ pub struct App {
     had_focus: bool,
     share_requests: Arc<Mutex<Vec<PathBuf>>>,
     confirm_remove: bool,
+    update: crate::updater::StatusRef,
 }
 
 impl App {
@@ -344,6 +353,12 @@ impl App {
         }
         config::register_context_menu(&cfg.accounts);
 
+        let update = crate::updater::StatusRef::default();
+        {
+            let c = controls.clone();
+            crate::updater::spawn_checker(update.clone(), ctx.clone(), || Config::load().auto_update, move || c.idle());
+        }
+
         let screen = if cfg.accounts.is_empty() { Screen::Form(AccountForm::new(&cfg)) } else { Screen::Main };
         if !autostart || cfg.accounts.is_empty() || !share_requests.lock().unwrap().is_empty() {
             win.show(&ctx, None);
@@ -364,6 +379,7 @@ impl App {
             had_focus: false,
             share_requests,
             confirm_remove: false,
+            update,
         }
     }
 
@@ -763,6 +779,34 @@ impl App {
 
     fn activity_tab(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        // Hinweis auf ein verfügbares Update
+        let status = self.update.lock().unwrap().clone();
+        if matches!(status, crate::updater::Status::Available(_) | crate::updater::Status::Failed(_)) {
+            let text = match &status {
+                crate::updater::Status::Available(l) => format!("Update auf Version {} verfügbar", l.version),
+                crate::updater::Status::Failed(e) => format!("Update fehlgeschlagen: {e}"),
+                _ => String::new(),
+            };
+            egui::Frame::new().fill(ACCENT_DIM).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.add(egui::Label::new(RichText::new(&text).color(TEXT)).truncate());
+                    if let crate::updater::Status::Available(l) = &status {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add(egui::Button::new(theme::button_text("Installieren").color(BG)).fill(ACCENT)).clicked() {
+                                let (upd, c, l) = (self.update.clone(), ctx.clone(), l.clone());
+                                std::thread::spawn(move || crate::updater::run_install(&upd, &c, &l));
+                            }
+                        });
+                    }
+                });
+            });
+        } else if let crate::updater::Status::Downloading(p) = status {
+            egui::Frame::new().fill(ACCENT_DIM).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new(format!("Update wird geladen … {} %", (p * 100.0) as u32)).color(TEXT));
+            });
+        }
         let rt = &mut self.rts[self.selected];
         let (phase, used, quota, last_sync, activity, progress) = {
             let sh = rt.shared.lock().unwrap();
@@ -1009,6 +1053,20 @@ impl App {
 
     fn settings_tab(&mut self, ui: &mut egui::Ui) {
         let full = ui.max_rect();
+        egui::ScrollArea::vertical().max_height(full.height() - 34.0).auto_shrink([false, false]).show(ui, |ui| self.settings_body(ui));
+        let r = Rect::from_min_max(Pos2::new(full.left(), full.bottom() - 34.0), full.max);
+        ui.painter().rect_filled(r, 0.0, BG);
+        ui.painter().hline(r.x_range(), r.top(), Stroke::new(1.0, BORDER));
+        ui.painter().text(
+            Pos2::new(r.left() + 12.0, r.center().y),
+            egui::Align2::LEFT_CENTER,
+            format!("Änderungen gelten sofort · DropCraft {}", crate::updater::version()),
+            egui::FontId::proportional(10.5),
+            TEXT_DIM,
+        );
+    }
+
+    fn settings_body(&mut self, ui: &mut egui::Ui) {
         let mut changed_bw = false;
         let mut changed = false;
         section_label(ui, "Bandbreite", None);
@@ -1045,6 +1103,46 @@ impl App {
                 std::thread::spawn(|| crate::notify::show("DropCraft", "So sehen Benachrichtigungen aus."));
             }
         });
+        if crate::updater::SUPPORTED {
+            section_label(ui, "Updates", None);
+            let mut au = self.cfg.auto_update;
+            setting_row(ui, "Automatisch installieren", Some("sonst nur benachrichtigen"), |ui| {
+                if toggle(ui, &mut au).changed() {
+                    changed = true;
+                }
+            });
+            self.cfg.auto_update = au;
+            let status = self.update.lock().unwrap().clone();
+            let ctx = ui.ctx().clone();
+            let upd = self.update.clone();
+            use crate::updater::Status;
+            let sub = match &status {
+                Status::Idle => String::new(),
+                Status::Checking => "Suche …".into(),
+                Status::UpToDate => "Aktuell".into(),
+                Status::Available(l) => format!("Version {} verfügbar", l.version),
+                Status::Downloading(p) => format!("Lädt … {} %", (p * 100.0) as u32),
+                Status::Restarting => "Startet neu …".into(),
+                Status::Failed(e) | Status::CheckFailed(e) => e.clone(),
+            };
+            let title = format!("Version {}", crate::updater::version());
+            setting_row(ui, &title, (!sub.is_empty()).then_some(sub.as_str()), |ui| match &status {
+                Status::Available(l) => {
+                    if ui.add(egui::Button::new(theme::button_text("Installieren").color(BG)).fill(ACCENT)).on_hover_text(&l.notes).clicked() {
+                        let l = l.clone();
+                        std::thread::spawn(move || crate::updater::run_install(&upd, &ctx, &l));
+                    }
+                }
+                Status::Checking | Status::Downloading(_) | Status::Restarting => {
+                    ui.add(egui::Spinner::new().size(14.0).color(TEXT_DIM));
+                }
+                _ => {
+                    if ui.link(RichText::new("Nach Updates suchen").color(ACCENT)).clicked() {
+                        std::thread::spawn(move || crate::updater::check_now(&upd, &ctx));
+                    }
+                }
+            });
+        }
         if changed_bw {
             let parse = |s: &str| s.trim().replace(',', ".").parse::<f64>().ok().filter(|v| *v > 0.0).unwrap_or(0.0);
             self.cfg.up_limit_mbps = parse(&self.settings.up);
@@ -1055,16 +1153,7 @@ impl App {
         if changed {
             self.save();
         }
-        let r = Rect::from_min_max(Pos2::new(full.left(), full.bottom() - 34.0), full.max);
-        ui.painter().rect_filled(r, 0.0, BG);
-        ui.painter().hline(r.x_range(), r.top(), Stroke::new(1.0, BORDER));
-        ui.painter().text(
-            Pos2::new(r.left() + 12.0, r.center().y),
-            egui::Align2::LEFT_CENTER,
-            format!("Änderungen gelten sofort · DropCraft {}", env!("CARGO_PKG_VERSION")),
-            egui::FontId::proportional(10.5),
-            TEXT_DIM,
-        );
+        ui.add_space(12.0);
     }
 }
 

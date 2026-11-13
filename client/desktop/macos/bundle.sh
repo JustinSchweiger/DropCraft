@@ -11,6 +11,10 @@ rm -rf "$APP" "$OUT/AppIcon.iconset"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$OUT/DropCraft" "$APP/Contents/MacOS/DropCraft"
 cp desktop/macos/Info.plist "$APP/Contents/Info.plist"
+if [ -n "${DROPCRAFT_VERSION:-}" ]; then
+  plutil -replace CFBundleShortVersionString -string "$DROPCRAFT_VERSION" "$APP/Contents/Info.plist"
+  plutil -replace CFBundleVersion -string "${DROPCRAFT_VERSION##*.}" "$APP/Contents/Info.plist"
+fi
 "$OUT/DropCraft" --export-iconset "$OUT/AppIcon.iconset"
 iconutil -c icns "$OUT/AppIcon.iconset" -o "$APP/Contents/Resources/AppIcon.icns"
 # Ad-hoc-Signatur: reicht zum Starten auf dem eigenen Mac

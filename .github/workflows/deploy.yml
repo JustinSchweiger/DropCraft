@@ -1,7 +1,7 @@
 name: Deploy
 
-# Nach erfolgreicher CI auf main: Server aktualisieren und die Windows-App
-# als Download auf der Startseite (https://<domain>/) bereitstellen.
+# Nach erfolgreicher CI auf main: Server aktualisieren und die Apps samt
+# latest.json unter https://<domain>/updates/ bereitstellen (Selbst-Update).
 # Benötigt die Repository-Secrets DEPLOY_HOST und DEPLOY_SSH_KEY.
 on:
   workflow_run:
@@ -33,15 +33,37 @@ jobs:
         if: env.DEPLOY_HOST != ''
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
-      - name: Windows-App aus der CI holen
+      - name: Apps aus der CI holen
         continue-on-error: true
         if: env.DEPLOY_HOST != '' && github.event_name == 'workflow_run'
         uses: actions/download-artifact@v4
         with:
-          name: DropCraft-standard
-          path: dist
+          pattern: DropCraft-*
+          path: art
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Update-Dateien vorbereiten
+        if: env.DEPLOY_HOST != '' && github.event_name == 'workflow_run'
+        run: |
+          mkdir -p dist
+          [ -f art/DropCraft-cloud-files/DropCraft.exe ] && cp art/DropCraft-cloud-files/DropCraft.exe dist/DropCraft-Windows.exe
+          [ -f art/DropCraft-standard/DropCraft.exe ] && cp art/DropCraft-standard/DropCraft.exe dist/DropCraft-Windows-ohne-Cloud-Dateien.exe
+          [ -f art/DropCraft-macOS/DropCraft-macOS.zip ] && cp art/DropCraft-macOS/DropCraft-macOS.zip dist/
+          [ -f art/DropCraft-iOS/DropCraft.ipa ] && cp art/DropCraft-iOS/DropCraft.ipa dist/DropCraft-iOS.ipa
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess
+          files = {"windows": "DropCraft-Windows.exe", "windows-standard": "DropCraft-Windows-ohne-Cloud-Dateien.exe",
+                   "macos": "DropCraft-macOS.zip", "ios": "DropCraft-iOS.ipa"}
+          out = {}
+          for key, name in files.items():
+              p = os.path.join("dist", name)
+              if os.path.exists(p):
+                  out[key] = {"name": name, "size": os.path.getsize(p), "sha256": hashlib.sha256(open(p, "rb").read()).hexdigest()}
+          notes = subprocess.run(["git", "log", "-1", "--pretty=%s"], capture_output=True, text=True).stdout.strip()
+          info = {"version": "0.1.${{ github.event.workflow_run.run_number }}", "notes": notes, "files": out}
+          json.dump(info, open("dist/latest.json", "w"), indent=1)
+          print(json.dumps(info, indent=1))
+          PY
       - name: SSH einrichten
         if: env.DEPLOY_HOST != ''
         run: |
@@ -57,8 +79,11 @@ jobs:
           SSH="ssh -i ~/.ssh/deploy root@$DEPLOY_HOST"
           scp -i ~/.ssh/deploy dropcraft.zip dropcraft-update.sh "root@$DEPLOY_HOST:/opt/"
           $SSH "bash /opt/dropcraft-update.sh"
-          if [ -f dist/DropCraft.exe ]; then
-            $SSH "mkdir -p /opt/dropcraft/deploy/data/public"
-            scp -i ~/.ssh/deploy dist/DropCraft.exe "root@$DEPLOY_HOST:/opt/dropcraft/deploy/data/public/DropCraft.exe.neu"
-            $SSH "cd /opt/dropcraft/deploy/data/public && mv DropCraft.exe.neu DropCraft.exe && chmod 644 DropCraft.exe && chown -R 10001:10001 ."
+          if [ -f dist/latest.json ]; then
+            # Erst die Apps, zuletzt latest.json – so zeigt sie nie auf halbe Dateien.
+            P=/opt/dropcraft/deploy/data/public
+            $SSH "mkdir -p $P/neu"
+            scp -i ~/.ssh/deploy dist/*.exe dist/*.zip dist/*.ipa "root@$DEPLOY_HOST:$P/neu/" || true
+            scp -i ~/.ssh/deploy dist/latest.json "root@$DEPLOY_HOST:$P/neu/latest.json.neu"
+            $SSH "cd $P && for f in neu/*; do b=\$(basename \$f); [ \$b = latest.json.neu ] || mv -f \$f \$b; done && mv -f neu/latest.json.neu latest.json && rmdir neu && rm -f DropCraft.exe && chmod 644 * && chown -R 10001:10001 ."
           fi

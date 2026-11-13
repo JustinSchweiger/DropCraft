@@ -120,6 +120,11 @@ check "Ablauf in Vergangenheit" "$(J "${A[@]}" -X PATCH $B/shares/$TOK -d '{"exp
 check "abgelaufen" "$(code $S)" 410
 check "Ablauf entfernen" "$(J "${A[@]}" -X PATCH $B/shares/$TOK -d '{"expires_at":0}' | jq .expires_at)" null
 check "Startseite" "$(curl -s http://127.0.0.1:18080/ | grep -c 'Private Cloud')" 1
+# Updates
+mkdir -p "$DATA/public" && echo '{"version":"0.1.5"}' > "$DATA/public/latest.json"
+check "Update-Info" "$(curl -s http://127.0.0.1:18080/updates/latest.json | jq -r .version)" "0.1.5"
+check "Update unbekannte Datei" "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/updates/geheim.db)" 404
+check "Update fehlende Datei" "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/updates/DropCraft-macOS.zip)" 404
 # Web-App und signierte Links
 check "Web-App" "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/app/)" 200
 check "Web-App-Skript" "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/app/app.js)" 200

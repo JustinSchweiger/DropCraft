@@ -571,7 +571,13 @@ pub async fn file(State(state): State<AppState>, Path(token): Path<String>, Quer
 // ------------------------------------------------------------ Startseite
 
 fn app_exe(state: &AppState) -> std::path::PathBuf {
-    state.cfg.data_dir.join("public").join("DropCraft.exe")
+    let public = state.cfg.data_dir.join("public");
+    let current = public.join("DropCraft-Windows.exe");
+    if current.exists() {
+        current
+    } else {
+        public.join("DropCraft.exe")
+    }
 }
 
 pub async fn landing(State(state): State<AppState>) -> Response {
@@ -581,6 +587,12 @@ pub async fn landing(State(state): State<AppState>) -> Response {
             human(m.len() as i64)
         ),
         Err(_) => String::new(),
+    };
+    let mac = state.cfg.data_dir.join("public").join("DropCraft-macOS.zip");
+    let download = if mac.exists() {
+        format!(r#"{download}<a class="btn big" href="/updates/DropCraft-macOS.zip">{ICON_DOWNLOAD}Mac-App herunterladen</a>"#)
+    } else {
+        download
     };
     let body = format!(
         r#"<section class="hero"><div class="hero-logo">{ICON_CUBE_BIG}</div><h1>DropCraft</h1>

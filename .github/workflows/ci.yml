@@ -5,6 +5,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+env:
+  # Versionsnummer der Apps: steigt mit jedem CI-Lauf (für Updates und Tags)
+  DROPCRAFT_VERSION: 0.1.${{ github.run_number }}
+
 jobs:
   server-und-kern:
     name: Server + Sync-Kern (Linux)
@@ -92,6 +96,7 @@ jobs:
         run: |
           xcodebuild -project DropCraft.xcodeproj -scheme DropCraft -configuration Release \
             -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            MARKETING_VERSION=$DROPCRAFT_VERSION CURRENT_PROJECT_VERSION=${{ github.run_number }} \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build | tail -n 60
           test -d build/Build/Products/Release-iphoneos/DropCraft.app
       - name: IPA packen (für SideStore/AltStore/Sideloadly)
@@ -129,23 +134,20 @@ jobs:
           cp art/DropCraft-macOS/DropCraft-macOS.zip out/DropCraft-macOS.zip
           cp art/DropCraft-iOS/DropCraft.ipa out/DropCraft-iOS.ipa
           ls -la out
-      - name: Release aktualisieren
+      - name: Release anlegen
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          SHA=$(git rev-parse --short HEAD)
+          V="$DROPCRAFT_VERSION"
           MSG=$(git log -1 --pretty=%s)
-          NOTES="Automatisch gebaut aus \`$SHA\` ($(date -u +'%d.%m.%Y %H:%M') UTC): $MSG
+          NOTES="Automatisch gebaut aus \`$(git rev-parse --short HEAD)\` am $(date -u +'%d.%m.%Y %H:%M') UTC: $MSG
 
           - **DropCraft-Windows.exe**: Windows-App mit Dateien bei Bedarf (empfohlen)
           - **DropCraft-Windows-ohne-Cloud-Dateien.exe**: lädt immer alle Dateien
           - **DropCraft-macOS.zip**: Mac-App (beim ersten Start Rechtsklick → Öffnen)
-          - **DropCraft-iOS.ipa**: unsigniert, für SideStore/AltStore/Sideloadly"
-          git tag -f latest
-          git push -f origin latest
-          if gh release view latest >/dev/null 2>&1; then
-            gh release edit latest --title "Neuester Stand ($SHA)" --notes "$NOTES" --latest
-          else
-            gh release create latest --title "Neuester Stand ($SHA)" --notes "$NOTES" --latest
-          fi
-          gh release upload latest out/* --clobber
+          - **DropCraft-iOS.ipa**: unsigniert, für SideStore/AltStore/Sideloadly
+
+          Installierte Apps aktualisieren sich selbst (Einstellungen → Updates)."
+          # Alten „latest“-Sammelstand einmalig aufräumen
+          if gh release view latest >/dev/null 2>&1; then gh release delete latest --yes --cleanup-tag; fi
+          gh release create "v$V" out/* --target "$GITHUB_SHA" --title "DropCraft $V" --notes "$NOTES" --latest

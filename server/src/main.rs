@@ -87,6 +87,7 @@ pub fn router(state: AppState) -> Router {
         .route("/download/windows", get(shares::download_app))
         .route("/assets/upload.js", get(shares::upload_js))
         .route("/dl", get(webapp::dl))
+        .route("/updates/{name}", get(webapp::update_file))
         .route("/app", get(|| async { axum::response::Redirect::permanent("/app/") }))
         .route("/app/", get(webapp::index))
         .route("/app/{name}", get(webapp::file))

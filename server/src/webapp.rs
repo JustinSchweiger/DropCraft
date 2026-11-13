@@ -74,6 +74,37 @@ pub async fn dl(State(state): State<AppState>, Query(q): Query<DlQuery>, headers
     }
 }
 
+// ---------------------------------------------------------------- Updates
+
+/// Dateien, die die CI nach jedem Build in `data/public` legt.
+const UPDATE_FILES: &[(&str, &str)] = &[
+    ("latest.json", "application/json"),
+    ("DropCraft-Windows.exe", "application/vnd.microsoft.portable-executable"),
+    ("DropCraft-Windows-ohne-Cloud-Dateien.exe", "application/vnd.microsoft.portable-executable"),
+    ("DropCraft-macOS.zip", "application/zip"),
+    ("DropCraft-iOS.ipa", "application/octet-stream"),
+];
+
+/// `GET /updates/{datei}` – Update-Infos und App-Downloads (öffentlich).
+pub async fn update_file(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+    let Some((name, mime)) = UPDATE_FILES.iter().find(|(n, _)| *n == name) else { return StatusCode::NOT_FOUND.into_response() };
+    let path = state.cfg.data_dir.join("public").join(name);
+    let (Ok(meta), Ok(file)) = (tokio::fs::metadata(&path).await, tokio::fs::File::open(&path).await) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let disposition = if name.ends_with(".json") { "inline".to_string() } else { format!("attachment; filename=\"{name}\"") };
+    (
+        [
+            (header::CONTENT_TYPE, mime.to_string()),
+            (header::CONTENT_LENGTH, meta.len().to_string()),
+            (header::CONTENT_DISPOSITION, disposition),
+            (header::CACHE_CONTROL, "no-cache".to_string()),
+        ],
+        axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file)),
+    )
+        .into_response()
+}
+
 // ---------------------------------------------------------------- statische Dateien
 
 const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; \
@@ -131,5 +162,6 @@ mod tests {
         assert_ne!(a, sign("geheim", 1, 100, "b.txt"));
         assert_ne!(a, sign("anders", 1, 100, "a.txt"));
         assert!(asset("app.js").is_some() && asset("../Cargo.toml").is_none());
+        assert!(UPDATE_FILES.iter().all(|(n, _)| !n.contains('/') && !n.contains("..")));
     }
 }

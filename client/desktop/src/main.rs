@@ -11,6 +11,7 @@ mod icons;
 mod notify;
 mod theme;
 mod tray;
+mod updater;
 mod worker;
 
 use std::{
@@ -33,6 +34,19 @@ fn main() -> eframe::Result {
     }
     let autostart = args.iter().any(|a| a == "--autostart");
     let share = args.iter().position(|a| a == "--share").and_then(|i| args.get(i + 1)).map(std::path::PathBuf::from);
+    // Nach einem Update: warten, bis die alte Instanz beendet ist.
+    if args.iter().any(|a| a == "--after-update") {
+        for _ in 0..50 {
+            match TcpListener::bind(("127.0.0.1", INSTANCE_PORT)) {
+                Ok(l) => {
+                    drop(l);
+                    break;
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(300)),
+            }
+        }
+    }
+    updater::cleanup();
     let listener = match TcpListener::bind(("127.0.0.1", INSTANCE_PORT)) {
         Ok(l) => l,
         Err(_) => {
