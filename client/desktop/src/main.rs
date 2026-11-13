@@ -47,6 +47,7 @@ fn main() -> eframe::Result {
         }
     }
     updater::cleanup();
+    notify::init();
     let listener = match TcpListener::bind(("127.0.0.1", INSTANCE_PORT)) {
         Ok(l) => l,
         Err(_) => {

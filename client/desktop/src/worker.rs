@@ -181,6 +181,10 @@ pub fn spawn(cfg: Account, shared: SharedRef, repaint: egui::Context, pause_flag
                         // Ereignisse eines abgebrochenen Durchgangs nicht verlieren.
                         if let Some(p) = sh.progress.clone() {
                             let evs = std::mem::take(&mut p.lock().unwrap().events);
+                            if !evs.is_empty() {
+                                let (api, dev, evs) = (api.clone(), cfg.device_name.clone(), evs.clone());
+                                std::thread::spawn(move || crate::notify::shared_folder_changes(&api, &dev, &evs));
+                            }
                             for ev in evs {
                                 sh.activity.push_front(ev);
                             }

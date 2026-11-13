@@ -67,36 +67,118 @@ pub fn summary(added: usize, removed: usize, who: &[String]) -> String {
 #[cfg(windows)]
 const APP_ID: &str = "DropCraft.App";
 
+/// Letzter Fehler beim Anzeigen (für „Test senden“ in den Einstellungen).
+static LAST_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn last_error() -> Option<String> {
+    LAST_ERROR.lock().unwrap().clone()
+}
+
+/// Beim Start aufrufen: App-ID setzen und bei Windows bekannt machen
+/// (Registry-Eintrag und Startmenü-Verknüpfung mit derselben ID – ohne
+/// beides verwirft Windows Meldungen von nicht installierten Programmen).
+pub fn init() {
+    #[cfg(windows)]
+    {
+        unsafe {
+            let id: Vec<u16> = APP_ID.encode_utf16().chain([0]).collect();
+            let _ = windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID(windows::core::PCWSTR(id.as_ptr()));
+        }
+        std::thread::spawn(|| {
+            register_app_id();
+            if let Err(e) = ensure_shortcut() {
+                *LAST_ERROR.lock().unwrap() = Some(format!("Startmenü-Verknüpfung: {e}"));
+            }
+        });
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = notify_rust::set_application("tech.dropcraft.app");
+    }
+}
+
 #[cfg(windows)]
 fn register_app_id() {
     use winreg::{enums::HKEY_CURRENT_USER, RegKey};
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let icon = crate::config::app_dir().join("dropcraft.ico");
-        if !icon.exists() {
-            let _ = std::fs::create_dir_all(crate::config::app_dir());
-            let _ = std::fs::write(&icon, crate::icons::ico_bytes(&[16, 32, 48, 256], crate::icons::logo_rgba));
+    let icon = crate::config::app_dir().join("dropcraft.ico");
+    if !icon.exists() {
+        let _ = std::fs::create_dir_all(crate::config::app_dir());
+        let _ = std::fs::write(&icon, crate::icons::ico_bytes(&[16, 32, 48, 256], crate::icons::logo_rgba));
+    }
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    if let Ok((key, _)) = hkcu.create_subkey(format!("Software\\Classes\\AppUserModelId\\{APP_ID}")) {
+        let _ = key.set_value("DisplayName", &"DropCraft");
+        let _ = key.set_value("IconUri", &icon.display().to_string());
+        let _ = key.set_value("IconBackgroundColor", &"FF0B0E12");
+    }
+}
+
+/// Startmenü-Verknüpfung „DropCraft“ mit unserer App-ID (der von Microsoft
+/// vorgesehene Weg für Benachrichtigungen ohne Installer).
+#[cfg(windows)]
+fn ensure_shortcut() -> Result<(), String> {
+    use windows::{
+        core::{Interface, HSTRING, PWSTR},
+        Win32::{
+            Storage::EnhancedStorage::PKEY_AppUserModel_ID,
+            System::{
+                Com::{CoCreateInstance, CoInitializeEx, IPersistFile, StructuredStorage::PROPVARIANT, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED},
+                Variant::VT_LPWSTR,
+            },
+            UI::Shell::{IShellLinkW, PropertiesSystem::IPropertyStore, ShellLink},
+        },
+    };
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let appdata = std::env::var_os("APPDATA").ok_or("APPDATA fehlt")?;
+    let dir = std::path::PathBuf::from(appdata).join("Microsoft\\Windows\\Start Menu\\Programs");
+    let lnk = dir.join("DropCraft.lnk");
+    // Nur neu schreiben, wenn das Programm woanders liegt als beim letzten Mal.
+    let stamp = crate::config::app_dir().join("shortcut.txt");
+    if lnk.exists() && std::fs::read_to_string(&stamp).ok().as_deref() == Some(exe.display().to_string().as_str()) {
+        return Ok(());
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).map_err(|e| e.to_string())?;
+        link.SetPath(&HSTRING::from(exe.as_os_str())).map_err(|e| e.to_string())?;
+        if let Some(d) = exe.parent() {
+            let _ = link.SetWorkingDirectory(&HSTRING::from(d.as_os_str()));
         }
-        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        if let Ok((key, _)) = hkcu.create_subkey(format!("Software\\Classes\\AppUserModelId\\{APP_ID}")) {
-            let _ = key.set_value("DisplayName", &"DropCraft");
-            let _ = key.set_value("IconUri", &icon.display().to_string());
-            let _ = key.set_value("IconBackgroundColor", &"FF0B0E12");
-        }
-    });
+        let _ = link.SetDescription(&HSTRING::from("DropCraft"));
+        let store: IPropertyStore = link.cast().map_err(|e| e.to_string())?;
+        let mut id: Vec<u16> = APP_ID.encode_utf16().chain([0]).collect();
+        let mut pv = PROPVARIANT::default();
+        (*pv.Anonymous.Anonymous).vt = VT_LPWSTR;
+        (*pv.Anonymous.Anonymous).Anonymous.pwszVal = PWSTR(id.as_mut_ptr());
+        store.SetValue(&PKEY_AppUserModel_ID, &pv).map_err(|e| e.to_string())?;
+        store.Commit().map_err(|e| e.to_string())?;
+        // `pv` zeigt auf unseren Puffer: nicht von Windows freigeben lassen.
+        std::mem::forget(pv);
+        let file: IPersistFile = link.cast().map_err(|e| e.to_string())?;
+        file.Save(&HSTRING::from(lnk.as_os_str()), true).map_err(|e| e.to_string())?;
+        drop(id);
+    }
+    let _ = std::fs::write(stamp, exe.display().to_string());
+    Ok(())
 }
 
 pub fn show(title: &str, body: &str) {
     let mut n = notify_rust::Notification::new();
     n.appname("DropCraft").summary(title).body(body);
     #[cfg(windows)]
-    {
-        register_app_id();
-        n.app_id(APP_ID);
-    }
-    let res = n.show();
-    if let Err(e) = res {
-        log::warn!("Benachrichtigung fehlgeschlagen: {e}");
+    n.app_id(APP_ID);
+    match n.show() {
+        Ok(_) => *LAST_ERROR.lock().unwrap() = None,
+        Err(e) => {
+            log::warn!("Benachrichtigung fehlgeschlagen: {e}");
+            *LAST_ERROR.lock().unwrap() = Some(e.to_string());
+            // Notlösung: über die Standard-ID (erscheint als „PowerShell“)
+            #[cfg(windows)]
+            {
+                let _ = notify_rust::Notification::new().summary(title).body(body).show();
+            }
+        }
     }
 }
 

@@ -1098,7 +1098,8 @@ impl App {
             }
         });
         self.cfg.notifications = n;
-        setting_row(ui, "Test-Benachrichtigung", None, |ui| {
+        let err = crate::notify::last_error();
+        setting_row(ui, "Test-Benachrichtigung", err.as_deref(), |ui| {
             if ui.link(RichText::new("Senden").color(ACCENT)).clicked() {
                 std::thread::spawn(|| crate::notify::show("DropCraft", "So sehen Benachrichtigungen aus."));
             }
