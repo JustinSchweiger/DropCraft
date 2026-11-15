@@ -1,12 +1,21 @@
 # Caddy holt automatisch ein HTTPS-Zertifikat von Let's Encrypt.
 # DROPCRAFT_ALIASES: weitere Adressen (z. B. die alte), durch Leerzeichen getrennt.
 {$DROPCRAFT_DOMAIN} {$DROPCRAFT_ALIASES} {
-	reverse_proxy dropcraft:8080 {
-		# Große Uploads nicht puffern, direkt durchreichen.
-		flush_interval -1
-		transport http {
-			read_timeout 0
-			write_timeout 0
+	# Musik-Check (statische Seite, rechnet komplett im Browser)
+	redir /musik /musik/ 308
+	handle_path /musik/* {
+		root * /srv/musik
+		header Cache-Control "no-cache"
+		file_server
+	}
+	handle {
+		reverse_proxy dropcraft:8080 {
+			# Große Uploads nicht puffern, direkt durchreichen.
+			flush_interval -1
+			transport http {
+				read_timeout 0
+				write_timeout 0
+			}
 		}
 	}
 	header {

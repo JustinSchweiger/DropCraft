@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Musik-Check</title>
+<meta name="description" content="Schnittfassungen prüfen: Lautstärke der einzelnen Teile, Übersteuerung und Aufbau der Datei.">
+<meta name="theme-color" content="#0b0e12">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0e12'/%3E%3Cg fill='%2319e3f0'%3E%3Crect x='6' y='12' width='3' height='8' rx='1.5'/%3E%3Crect x='11' y='7' width='3' height='18' rx='1.5'/%3E%3Crect x='16' y='10' width='3' height='12' rx='1.5'/%3E%3Crect x='21' y='5' width='3' height='22' rx='1.5'/%3E%3C/g%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><g fill="currentColor"><rect x="6" y="12" width="3" height="8" rx="1.5"/><rect x="11" y="7" width="3" height="18" rx="1.5"/><rect x="16" y="10" width="3" height="12" rx="1.5"/><rect x="21" y="5" width="3" height="22" rx="1.5"/></g></svg>
+    <span>Musik-Check</span>
+  </div>
+  <button id="neu" class="btn ghost hidden" type="button">Andere Datei</button>
+</header>
+
+<main>
+  <section id="start" class="start">
+    <h1>Passt die Musik für den Auftritt?</h1>
+    <p class="lead">Zieh eine zusammengeschnittene Musikdatei hierher. Der Check zeigt, wie sie aufgebaut ist, welche Teile zu leise oder übersteuert sind und was man verbessern kann.</p>
+    <label id="drop" class="drop" tabindex="0">
+      <input id="datei" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac,.opus">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0-12 4.5 4.5M12 3 7.5 7.5M4 15v3a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <strong><span class="desk">Datei hierher ziehen oder </span><u>auswählen</u></strong>
+      <span class="hint">MP3, WAV, M4A, OGG, FLAC · die Datei verlässt dein Gerät nicht</span>
+    </label>
+    <ul class="what">
+      <li><b>Aufbau</b> – Schnitte, Tempo und Länge jedes Teils</li>
+      <li><b>Lautstärke</b> – welcher Teil aus der Reihe fällt</li>
+      <li><b>Übersteuerung</b> – Stellen mit abgeschnittenen Spitzen</li>
+      <li><b>Angleichen</b> – fertige Fassung zum Herunterladen</li>
+    </ul>
+  </section>
+
+  <section id="laden" class="laden hidden">
+    <div class="spin"></div>
+    <p id="laden-text">Datei wird gelesen …</p>
+    <div class="bar"><i id="laden-bar"></i></div>
+  </section>
+
+  <section id="ergebnis" class="hidden">
+    <div class="kopf">
+      <div class="titel">
+        <h2 id="name"></h2>
+        <p id="format" class="dim"></p>
+      </div>
+      <div id="urteil" class="urteil"></div>
+    </div>
+
+    <div id="zahlen" class="zahlen"></div>
+
+    <div class="karte">
+      <div class="player">
+        <button id="play" class="rund" type="button" aria-label="Abspielen"></button>
+        <span id="zeit" class="zeit">0:00 / 0:00</span>
+        <div class="seg-switch" role="group" aria-label="Fassung">
+          <button id="m-orig" class="on" type="button">Original</button>
+          <button id="m-neu" type="button">Angeglichen</button>
+        </div>
+        <span class="flex"></span>
+        <div class="zoom">
+          <button id="z-aus" class="btn icon" type="button" aria-label="Verkleinern">−</button>
+          <button id="z-alles" class="btn icon" type="button" aria-label="Ganze Datei">⤢</button>
+          <button id="z-ein" class="btn icon" type="button" aria-label="Vergrößern">+</button>
+        </div>
+      </div>
+      <div class="wellen">
+        <canvas id="welle"></canvas>
+        <canvas id="kurve"></canvas>
+      </div>
+      <div class="legende">
+        <span><i style="background:#2f80ff"></i>Bass</span>
+        <span><i style="background:#f5a524"></i>Mitten</span>
+        <span><i style="background:#eef2ff"></i>Höhen</span>
+        <span><i style="background:#19e3f0"></i>Lautheit</span>
+        <span><i style="background:#ef4455"></i>Spitzen / Übersteuerung</span>
+        <span><i class="band"></i>Zielbereich ±2 LU</span>
+      </div>
+      <div class="werkzeug">
+        <button id="cut-add" class="btn" type="button">+ Schnitt an Abspielposition</button>
+        <button id="cut-neu" class="btn" type="button">Schnitte neu erkennen</button>
+        <span class="dim klein desk">Doppelklick setzt einen Schnitt · Schnittmarke ziehen zum Verschieben · Rechtsklick entfernt</span>
+      </div>
+    </div>
+
+    <div class="spalten">
+      <div class="karte">
+        <h3>Aufbau der Datei</h3>
+        <div id="aufbau" class="aufbau"></div>
+        <div class="tabelle-wrap"><table id="teile" class="teile"></table></div>
+      </div>
+      <div class="karte">
+        <h3>Tipps</h3>
+        <ul id="tipps" class="tipps"></ul>
+        <div class="angleichen">
+          <h4>Angeglichene Fassung</h4>
+          <p class="dim klein">Bringt alle Teile auf dieselbe Lautheit und begrenzt die Spitzen auf −1 dBFS. Bereits verzerrte Stellen bleiben verzerrt.</p>
+          <label class="feld">Ziel
+            <select id="ziel">
+              <option value="median">wie der Großteil der Datei</option>
+              <option value="-14">−14 LUFS (ruhig)</option>
+              <option value="-11">−11 LUFS (kräftig)</option>
+              <option value="-9">−9 LUFS (sehr laut)</option>
+            </select>
+          </label>
+          <div class="knoepfe">
+            <button id="laden-wav" class="btn primaer" type="button">WAV herunterladen</button>
+            <button id="drucken" class="btn" type="button">Prüfbericht drucken</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+<div id="toast" class="toast"></div>
+<script src="kern.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

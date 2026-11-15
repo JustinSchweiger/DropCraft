@@ -203,3 +203,10 @@ cargo run --release                          # Server auf :8080, Daten in ./data
 DROPCRAFT_PASSWORD=geheim1234 cargo run --release -- adduser justin 10 --admin
 ./tests/api_test.sh                          # End-to-End-Tests (braucht curl + jq)
 ```
+
+## Musik-Check (https://dropcraft.tech/musik/)
+
+Kleine Webseite zum Prüfen zusammengeschnittener Musikdateien (z. B. für den Fasching):
+Aufbau mit Schnitten und Tempo, Lautheit (LUFS nach EBU R128) je Teil, Übersteuerungen,
+Tipps und eine angeglichene WAV-Fassung zum Herunterladen. Die Analyse läuft komplett im
+Browser, die Musik wird nicht hochgeladen. Dateien: `deploy/musik/`, ausgeliefert von Caddy.
