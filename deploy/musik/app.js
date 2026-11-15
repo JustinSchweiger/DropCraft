@@ -8,8 +8,31 @@ const STREIFEN = { ok: '#123a2e', warn: '#3d300c', bad: '#43161c', leer: '#1a202
 
 const S = {
   view: { t0: 0, t1: 1 }, sel: -1, mode: 'orig', playing: false, offset: 0,
-  grids: new Map(), dirty: true, hoverCut: -1,
+  grids: new Map(), dirty: true, hoverCut: -1, trim: [0, 0],
 };
+const speicher = {
+  get(k, d) { try { const v = localStorage.getItem('musikcheck.' + k); return v == null ? d : v; } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem('musikcheck.' + k, v); } catch (e) { /* egal */ } },
+};
+
+// ---------- Ansicht: einfach / Profi ----------
+function ansicht(v) {
+  S.ansicht = v;
+  document.body.classList.toggle('einfach', v === 'einfach');
+  document.body.classList.toggle('profi', v === 'profi');
+  $('#v-einfach').classList.toggle('on', v === 'einfach');
+  $('#v-profi').classList.toggle('on', v === 'profi');
+  speicher.set('ansicht', v);
+  if (v === 'einfach' && S.dur) setView(0, S.dur);
+  if (S.segs) zeichneAlles();
+}
+ansicht(speicher.get('ansicht', 'einfach'));
+$('#v-einfach').addEventListener('click', () => ansicht('einfach'));
+$('#v-profi').addEventListener('click', () => ansicht('profi'));
+// Für den Prüfbericht immer die ausführliche Ansicht drucken
+let vorDruck = null;
+window.addEventListener('beforeprint', () => { if (S.ansicht !== 'profi') { vorDruck = S.ansicht; ansicht('profi'); } });
+window.addEventListener('afterprint', () => { if (vorDruck) { ansicht(vorDruck); vorDruck = null; } });
 
 // ---------- Zahlen und Zeiten ----------
 const minus = (s) => s.replace('-', '−');
@@ -116,6 +139,8 @@ async function lade(file) {
     r.grids.forEach((g, i) => S.grids.set(b0[i] + '-' + b0[i + 1], g));
     neuBerechnen(true);
     $('#m-orig').classList.add('on'); $('#m-neu').classList.remove('on');
+    korrekturStatus(null);
+    if (S.ansicht === 'einfach') S.view = { t0: 0, t1: S.dur };
     zeige('ergebnis');
     S.dirty = true;
     requestAnimationFrame(male);
@@ -165,8 +190,10 @@ function neuBerechnen(aufraeumen = false) {
     else s.lvl = 'ok';
     s.grid = S.grids.get(s.a + '-' + s.b);
   }
+  const warKorrigiert = !!S.levelled;
   S.levelled = null; S.levelKey = '';
-  if (S.mode === 'neu') modus('neu', true);
+  korrekturStatus(warKorrigiert ? 'laeuft' : null, 'Schnitte geändert – Korrektur wird neu berechnet …');
+  if (S.mode === 'neu' || warKorrigiert) modus(S.mode, true, warKorrigiert);
   S.dirty = true;
   zeichneAlles();
   tempoNachladen();
@@ -253,6 +280,51 @@ function tippsBerechnen() {
   return T;
 }
 
+// ---------- Einfache Sprache ----------
+const verzerrt = (s) => s.clipEv >= 3 && s.rate > 2;
+function wort(s) {
+  if (s.lvl === 'leer') return 'Stille';
+  const w = s.d < -4 ? 'viel zu leise' : s.d < -2 ? 'etwas zu leise' : s.d > 4 ? 'viel zu laut' : s.d > 2 ? 'etwas zu laut' : '';
+  if (verzerrt(s)) return w ? w + ', verzerrt' : 'verzerrt';
+  return w || 'passt';
+}
+function einfacheTipps() {
+  const T = [];
+  const add = (lvl, html, auto) => T.push({ lvl, html, auto });
+  const kurz = $('#trimmen').checked;
+  S.segs.forEach((s, i) => {
+    if (s.lvl === 'leer') return;
+    const name = `<a data-seg="${i}">Teil ${i + 1}</a> (${zeit(s.a / FPS)}–${zeit(s.b / FPS)})`;
+    if (s.d < -2) add(s.d < -4 ? 'bad' : 'warn', `${name} ist ${s.d < -4 ? 'viel' : 'etwas'} leiser als der Rest. Im Saal geht er unter, wenn die Anlage für die anderen Teile eingestellt ist.`, true);
+    if (s.d > 2) add(s.d > 4 ? 'bad' : 'warn', `${name} ist ${s.d > 4 ? 'viel' : 'etwas'} lauter als der Rest. Das Publikum erschrickt, der Techniker muss nachregeln.`, true);
+    if (verzerrt(s)) add(s.rate > 20 ? 'bad' : 'warn', `${name} klingt kratzig und verzerrt, weil er zu laut abgespeichert wurde. Das kann keine Korrektur reparieren – das Lied am besten in guter Qualität neu besorgen und neu einschneiden.`, false);
+  });
+  if (S.info.lead > 1.5) add('warn', `Am Anfang sind ${zahl(S.info.lead)} Sekunden Stille. Die Musik startet dann nicht sofort auf Kommando.`, kurz);
+  if (S.gesamt > -7) add('warn', 'Die Datei ist insgesamt sehr laut gemacht. Auf großen Anlagen klingt das schnell anstrengend.', true);
+  else if (S.gesamt < -20) add('warn', 'Die Datei ist insgesamt sehr leise. Der Techniker muss sehr weit aufdrehen.', true);
+  if (S.info.channels === 2 && S.info.corr != null && S.info.corr < 0) add('bad', 'Links und rechts arbeiten gegeneinander. Auf manchen Hallenanlagen sind Teile der Musik dann kaum zu hören.', false);
+  if (S.info.channels === 2) { const [l, r] = S.info.rms; if (Math.abs(l - r) > 3 && isFinite(l) && isFinite(r)) add('warn', `Der ${l < r ? 'linke' : 'rechte'} Lautsprecher ist deutlich leiser als der andere.`, false); }
+  if (S.kopf.typ === 'MP3' && S.file.size * 8 / S.dur / 1000 < 170) add('warn', 'Die Datei hat eine niedrige Qualität. Auf großen Boxen klingt sie dumpf. Besser eine Datei mit 320 kbit/s oder WAV besorgen.', false);
+  if (!T.length) add('ok', 'Alle Teile sind gleich laut und nichts ist übersteuert. Die Musik kann so verwendet werden.', null);
+  const rang = { bad: 0, warn: 1, info: 2, ok: 3 };
+  T.sort((a, b) => rang[a.lvl] - rang[b.lvl]);
+  return T;
+}
+function einfachesUrteil(tipps) {
+  const teile = S.segs.filter((s) => s.lvl !== 'leer');
+  const laut = teile.filter((s) => Math.abs(s.d) > 2).length, kaputt = teile.filter(verzerrt).length;
+  const schlecht = tipps.some((t) => t.lvl === 'bad'), warn = tipps.some((t) => t.lvl === 'warn');
+  const lvl = schlecht ? 'bad' : warn ? 'warn' : 'ok';
+  const kopf = { bad: 'Diese Musik sollte vor dem Auftritt überarbeitet werden.', warn: 'Fast gut – ein paar Kleinigkeiten.', ok: 'Alles in Ordnung – die Musik kann so verwendet werden.' }[lvl];
+  const teil = [];
+  if (laut) teil.push(`${laut} von ${teile.length} Teilen ${laut === 1 ? 'ist' : 'sind'} zu leise oder zu laut`);
+  if (kaputt) teil.push(`${kaputt} ${kaputt === 1 ? 'Teil klingt' : 'Teile klingen'} verzerrt`);
+  let sub = teil.length ? teil.join(', ') + '. ' : `Die Musik besteht aus ${teile.length} ${teile.length === 1 ? 'Teil' : 'Teilen'}. `;
+  if (tipps.some((t) => t.auto)) sub += 'Die Lautstärke behebt die automatische Korrektur mit einem Klick.';
+  if (tipps.some((t) => t.auto === false)) sub += (tipps.some((t) => t.auto) ? ' ' : '') + 'Einiges muss von Hand gemacht werden.';
+  return `<div class="gross">${{ bad: '✕', warn: '!', ok: '✓' }[lvl]}</div><div><b>${kopf}</b><p>${sub}</p></div>`;
+}
+
 // ---------- Anzeige ----------
 function zeichneAlles() {
   if (!S.segs) return;
@@ -265,12 +337,19 @@ function zeichneAlles() {
   $('#name').textContent = S.file.name;
   $('#format').textContent = teile.join(' · ');
 
-  const tipps = tippsBerechnen();
+  const einfach = S.ansicht === 'einfach';
+  const tipps = einfach ? einfacheTipps() : tippsBerechnen();
+  if (einfach) {
+    const e = $('#e-urteil');
+    e.className = 'e-urteil ' + (tipps.some((t) => t.lvl === 'bad') ? 'bad' : tipps.some((t) => t.lvl === 'warn') ? 'warn' : 'ok');
+    e.innerHTML = einfachesUrteil(tipps);
+  }
   const schlecht = tipps.some((t) => t.lvl === 'bad'), warn = tipps.some((t) => t.lvl === 'warn');
   const u = $('#urteil');
-  u.className = 'urteil ' + (schlecht ? 'bad' : warn ? 'warn' : 'ok');
+  u.className = 'urteil nur-profi ' + (schlecht ? 'bad' : warn ? 'warn' : 'ok');
   u.textContent = schlecht ? '✕ Überarbeiten' : warn ? '! Bitte prüfen' : '✓ Einsatzbereit';
-  $('#tipps').innerHTML = tipps.map((t) => `<li class="${t.lvl}"><span>${{ bad: '✕', warn: '!', info: 'i', ok: '✓' }[t.lvl]}</span><span>${t.html}</span></li>`).join('');
+  const marke = (t) => t.auto == null ? '' : t.auto ? ' <span class="marke auto">wird automatisch behoben</span>' : ' <span class="marke hand">von Hand nötig</span>';
+  $('#tipps').innerHTML = tipps.map((t) => `<li class="${t.lvl}"><span>${{ bad: '✕', warn: '!', info: 'i', ok: '✓' }[t.lvl]}</span><span>${t.html}${einfach ? marke(t) : ''}</span></li>`).join('');
 
   // Kennzahlen
   const rel = S.segs.filter((s) => s.lvl !== 'leer');
@@ -290,6 +369,7 @@ function zeichneAlles() {
   // Aufbau-Leiste
   $('#aufbau').innerHTML = S.segs.map((s, i) => {
     const g = s.grid ? ' · ' + Math.round(s.grid.bpm) + ' BPM' : '';
+    if (einfach) return `<div class="${s.lvl}${i === S.sel ? ' sel' : ''}" style="flex:${s.dur}" data-seg="${i}" title="Teil ${i + 1}: ${zeit(s.a / FPS)}–${zeit(s.b / FPS)}, ${wort(s)}"><b>Teil ${i + 1}</b>${wort(s)}</div>`;
     return `<div class="${s.lvl}${i === S.sel ? ' sel' : ''}" style="flex:${s.dur}" data-seg="${i}" title="Teil ${i + 1}: ${zeit(s.a / FPS)}–${zeit(s.b / FPS)}"><b>${i + 1}</b>${zeit(s.dur)}${g}</div>`;
   }).join('');
 
@@ -343,7 +423,26 @@ const tx = (t, w) => (t - S.view.t0) / (S.view.t1 - S.view.t0) * w;
 const xt = (x, w) => S.view.t0 + x / w * (S.view.t1 - S.view.t0);
 const WTOP = 20, WBOT = 16;
 
+// In der Ansicht „Korrigiert“: Verstärkung je Teil (dB), sonst null
+function anzeigeGain() {
+  if (S.mode !== 'neu' || !S.levelled) return null;
+  return verstaerkungen().map((x) => x.db);
+}
 function zeichneWelle(g, w, h) {
+  const gains = anzeigeGain();
+  const top = gains ? Math.max(...S.segs.map((s, i) => (s.lvl === 'leer' ? -Infinity : s.lufs + gains[i]))) : 0;
+  const maxLufs = Math.max(...S.segs.filter((s) => s.lvl !== 'leer').map((s) => s.lufs));
+  let skal = gains ? S.segs.map((s, i) => Math.pow(10, (gains[i] - (top - maxLufs)) / 20)) : null;
+  if (skal) {
+    // so skalieren, dass der kräftigste Teil die Höhe gerade füllt
+    let m = 0;
+    S.segs.forEach((s, i) => {
+      if (s.lvl === 'leer') return;
+      const v = Array.from(S.fr.low.subarray(s.a, s.b)).sort((x, y) => x - y);
+      m = Math.max(m, (v[Math.floor(v.length * 0.98)] || 0) * skal[i]);
+    });
+    if (m > 0) skal = skal.map((k) => k * 0.95 / m);
+  }
   g.fillStyle = '#0b0e12'; g.fillRect(0, 0, w, h);
   const wh = h - WTOP - WBOT, mid = WTOP + wh / 2, half = wh * 0.48;
   // Teile-Streifen
@@ -351,11 +450,14 @@ function zeichneWelle(g, w, h) {
   S.segs.forEach((s, i) => {
     const x0 = tx(s.a / FPS, w), x1 = tx(s.b / FPS, w);
     if (x1 < 0 || x0 > w) return;
-    g.fillStyle = STREIFEN[s.lvl]; g.fillRect(x0, 0, x1 - x0, WTOP - 2);
+    g.fillStyle = gains ? (s.lvl === 'leer' ? STREIFEN.leer : verzerrt(s) ? STREIFEN.warn : STREIFEN.ok) : STREIFEN[s.lvl]; g.fillRect(x0, 0, x1 - x0, WTOP - 2);
     if (i === S.sel) { g.fillStyle = 'rgba(25,227,240,0.07)'; g.fillRect(x0, WTOP, x1 - x0, wh); }
     g.save(); g.beginPath(); g.rect(x0, 0, x1 - x0, WTOP); g.clip();
-    g.fillStyle = FARBE[s.lvl];
-    const lab = s.lvl === 'leer' ? `${i + 1} · Stille` : `${i + 1} · ${zahl(s.lufs)} LUFS${Math.abs(s.d) > 2 ? ' (' + plus(s.d) + ')' : ''}`;
+    g.fillStyle = gains ? (s.lvl === 'leer' ? FARBE.leer : verzerrt(s) ? FARBE.warn : FARBE.ok) : FARBE[s.lvl];
+    const lab = gains ? (S.ansicht === 'einfach'
+      ? `Teil ${i + 1} · ${s.lvl === 'leer' ? 'Stille' : verzerrt(s) ? 'gleich laut, bleibt verzerrt' : 'korrigiert'}`
+      : `${i + 1} · ${s.lvl === 'leer' ? 'Stille' : zahl(s.lufs + gains[i]) + ' LUFS (' + plus(gains[i]) + ' dB)'}`)
+      : S.ansicht === 'einfach' ? `Teil ${i + 1} · ${wort(s)}` : s.lvl === 'leer' ? `${i + 1} · Stille` : `${i + 1} · ${zahl(s.lufs)} LUFS${Math.abs(s.d) > 2 ? ' (' + plus(s.d) + ')' : ''}`;
     g.fillText(x1 - x0 > 90 ? lab : String(i + 1), Math.max(x0, 0) + 6, WTOP / 2 - 1);
     g.restore();
   });
@@ -369,6 +471,10 @@ function zeichneWelle(g, w, h) {
     if (a >= S.nf) break;
     let l = 0, m = 0, hi = 0, c = 0;
     for (let i = a; i < b; i++) { if (low[i] > l) l = low[i]; if (md[i] > m) m = md[i]; if (high[i] > hi) hi = high[i]; c += clipEv[i]; }
+    if (skal) {
+      const k = skal[segAnFrame(a)] || 1;
+      l = Math.min(1, l * k); m = Math.min(1, m * k); hi = Math.min(1, hi * k);
+    }
     if (c) { g.fillStyle = 'rgba(239,68,85,0.22)'; g.fillRect(x, WTOP, step, wh); }
     const bar = (v, sc, col) => { const hh = v * half * sc; if (hh >= 0.5) { g.fillStyle = col; g.fillRect(x, mid - hh, step, hh * 2); } };
     bar(l, 1, '#2f80ff'); bar(m, 0.7, '#f5a524'); bar(hi, 0.45, '#eef2ff');
@@ -413,6 +519,8 @@ function zeichneKurve(g, w, h) {
   g.beginPath(); g.moveTo(0, y(ziel) + 0.5); g.lineTo(w, y(ziel) + 0.5); g.stroke(); g.setLineDash([]);
 
   const fpp = (S.view.t1 - S.view.t0) * FPS / w, f0v = S.view.t0 * FPS;
+  const gains = anzeigeGain();
+  const gAt = (f) => (gains ? gains[segAnFrame(f)] : 0);
   // Spitzenpegel
   g.strokeStyle = 'rgba(239,68,85,0.55)'; g.lineWidth = 1; g.beginPath();
   for (let x = 0; x < w; x++) {
@@ -420,17 +528,17 @@ function zeichneKurve(g, w, h) {
     const a = Math.max(0, Math.floor(c - r)), b = Math.min(S.nf, Math.max(a + 1, Math.ceil(c + r)));
     if (a >= S.nf) break;
     let p = 0; for (let i = a; i < b; i++) if (S.fr.peak[i] > p) p = S.fr.peak[i];
-    const yy = y(K.dbfs(p));
+    const yy = y(gains ? Math.min(-1, K.dbfs(p) + gAt(a)) : K.dbfs(p));
     x ? g.lineTo(x, yy) : g.moveTo(x, yy);
   }
   g.stroke();
   // Lautheit je Teil (Balken)
-  S.segs.forEach((s) => {
+  S.segs.forEach((s, si) => {
     if (s.lvl === 'leer') return;
     const x0 = tx(s.a / FPS, w), x1 = tx(s.b / FPS, w);
     if (x1 < 0 || x0 > w) return;
-    g.fillStyle = FARBE[s.lvl]; g.globalAlpha = 0.9;
-    g.fillRect(x0 + 2, y(s.lufs) - 2, Math.max(1, x1 - x0 - 4), 4);
+    g.fillStyle = gains ? FARBE.ok : FARBE[s.lvl]; g.globalAlpha = 0.9;
+    g.fillRect(x0 + 2, y(s.lufs + (gains ? gains[si] : 0)) - 2, Math.max(1, x1 - x0 - 4), 4);
     g.globalAlpha = 1;
   });
   // Kurzzeit-Lautheit
@@ -438,7 +546,7 @@ function zeichneKurve(g, w, h) {
   const st = S.fr.st;
   for (let x = 0; x < w; x++) {
     const j = Math.min(st.length - 1, Math.max(0, Math.round((f0v + x * fpp) / 10)));
-    const yy = y(st[j]);
+    const yy = y(st[j] + gAt(j * 10));
     x ? g.lineTo(x, yy) : g.moveTo(x, yy);
   }
   g.stroke();
@@ -487,9 +595,13 @@ function play(from) {
   S.ctx.resume();
   const src = S.ctx.createBufferSource();
   src.buffer = S.mode === 'neu' && S.levelled ? S.levelled : S.buf;
-  src.connect(S.ctx.destination);
-  src.start(0, S.offset);
-  S.src = src; S.startedAt = S.ctx.currentTime - S.offset; S.playing = true;
+  if (!S.gain) { S.gain = S.ctx.createGain(); S.gain.connect(S.ctx.destination); lautstaerke(); }
+  src.connect(S.gain);
+  // Die korrigierte Fassung kann vorne gekürzt sein: Zeit bleibt die des Originals
+  const tr = src.buffer === S.levelled ? S.levelTrim : 0;
+  const bo = Math.max(0, S.offset - tr);
+  src.start(0, bo);
+  S.src = src; S.startedAt = S.ctx.currentTime - (bo + tr); S.playing = true;
   src.onended = () => {
     if (S.src !== src) return;
     S.playing = false; S.offset = 0; S.src = null;
@@ -518,35 +630,78 @@ function springe(t) {
   if (S.playing) play(t); else { S.offset = Math.max(0, Math.min(S.dur, t)); male(); }
 }
 
+function lautstaerke() {
+  const v = Number($('#lautstaerke').value) / 100;
+  speicher.set('lautstaerke', String(Math.round(v * 100)));
+  if (S.gain) S.gain.gain.setTargetAtTime(v * v, S.ctx.currentTime, 0.02);
+}
+$('#lautstaerke').value = speicher.get('lautstaerke', '80');
+$('#lautstaerke').addEventListener('input', lautstaerke);
+
 // ---------- Angleichen ----------
 function zielLufs() {
   const v = $('#ziel').value;
-  return v === 'median' ? S.ref : Number(v);
+  // automatisch: wie der Großteil, aber nicht extrem leise oder laut
+  return v === 'median' ? Math.min(-9, Math.max(-18, S.ref)) : Number(v);
 }
 function verstaerkungen() {
   const ziel = zielLufs();
   return S.segs.map((s) => ({ a: s.a, b: s.b, db: s.lvl === 'leer' ? 0 : Math.max(-20, Math.min(20, ziel - s.lufs)) }));
 }
+function kuerzen() {
+  if (!$('#trimmen').checked) return [0, S.dur];
+  const a = S.info.lead > 0.3 ? S.info.lead - 0.1 : 0;
+  const b = S.info.trail > 1.5 ? S.dur - (S.info.trail - 1) : S.dur;
+  return [a, b];
+}
 async function angleichen() {
-  const gains = verstaerkungen();
-  const key = JSON.stringify(gains);
+  const gains = verstaerkungen(), trim = kuerzen();
+  const key = JSON.stringify([gains, trim]);
   if (S.levelled && S.levelKey === key) return S.levelled;
-  toast('Angeglichene Fassung wird berechnet …', 10000);
-  fortschritt = () => {};
-  const m = await frage({ cmd: 'level', gains, ceiling: -1 }, 'levelled');
+  korrekturStatus('laeuft', 'Korrektur wird berechnet …');
+  fortschritt = (p) => korrekturStatus('laeuft', `Korrektur wird berechnet … ${Math.round(p * 100)} %`);
+  const m = await frage({ cmd: 'level', gains, ceiling: -1, trim }, 'levelled');
   const buf = S.ctx.createBuffer(m.channels.length, m.channels[0].length, S.rate);
   m.channels.forEach((c, i) => buf.copyToChannel(c, i));
-  S.levelled = buf; S.levelKey = key;
-  toast('Angeglichene Fassung bereit.', 1800);
+  S.levelled = buf; S.levelKey = key; S.levelTrim = trim[0];
+  korrekturStatus('fertig');
   return buf;
 }
-async function modus(m, still = false) {
+function korrekturStatus(art, text) {
+  const el = $('#k-status');
+  $('#laden-wav').classList.toggle('hidden', art !== 'fertig');
+  $('#korrigieren').textContent = art === 'fertig' ? 'Neu berechnen' : 'Automatisch korrigieren';
+  if (!art) { el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
+  el.classList.toggle('laeuft', art === 'laeuft');
+  if (art === 'fertig') {
+    const teile = S.segs.filter((s) => s.lvl !== 'leer');
+    const verzerrt = teile.filter((s) => s.clipEv >= 3 && s.rate > 2).length;
+    const [a, b] = kuerzen();
+    const weg = [];
+    if (a > 0) weg.push(`${zahl(a)} s Stille am Anfang`);
+    if (b < S.dur) weg.push(`${zahl(S.dur - b)} s am Ende`);
+    text = `✓ Fertig: Alle ${teile.length} Teile sind jetzt gleich laut, die Spitzen werden begrenzt` +
+      (weg.length ? `, ${weg.join(' und ')} gekürzt` : '') + '. ' +
+      (verzerrt ? `${verzerrt === 1 ? 'Ein Teil bleibt' : verzerrt + ' Teile bleiben'} verzerrt – das lässt sich nicht automatisch reparieren. ` : '') +
+      'Oben mit „Original | Korrigiert“ vergleichen.';
+  }
+  el.textContent = text;
+}
+async function modus(m, still = false, berechnen = false) {
+  if (m === 'neu' && !S.levelled && !berechnen && !still) {
+    // erst korrigieren, dann umschalten
+    try { await angleichen(); } catch (e) { toast('Korrektur fehlgeschlagen: ' + e.message, 5000); return; }
+  }
+  if (berechnen && m === 'orig') { try { await angleichen(); } catch (e) { /* zeigt Knopf */ } }
   S.mode = m;
+  S.dirty = true;
   $('#m-orig').classList.toggle('on', m === 'orig');
   $('#m-neu').classList.toggle('on', m === 'neu');
   if (m === 'neu') {
-    try { await angleichen(); } catch (e) { toast('Angleichen fehlgeschlagen: ' + e.message, 5000); return; }
+    try { await angleichen(); } catch (e) { toast('Korrektur fehlgeschlagen: ' + e.message, 5000); return; }
   }
+  S.dirty = true; male();
   if (S.playing && !still) play(pos());
 }
 
@@ -570,11 +725,16 @@ function zoom(f, um) {
 }
 function waehle(i, zeigen = false) {
   S.sel = i;
-  if (zeigen && S.segs[i]) {
+  if (zeigen && S.ansicht === 'profi' && S.segs[i]) {
     const s = S.segs[i], pad = Math.max(1, (s.b - s.a) / FPS * 0.15);
     setView(s.a / FPS - pad, s.b / FPS + pad);
   }
   zeichneAlles();
+}
+function segAnFrame(f) {
+  let lo = 0, hi = S.segs.length - 1;
+  while (lo < hi) { const md = (lo + hi + 1) >> 1; if (S.segs[md].a <= f) lo = md; else hi = md - 1; }
+  return lo;
 }
 function segBei(t) { const f = t * FPS; return S.segs.findIndex((s) => f >= s.a && f < s.b); }
 function schnittSetzen(t) {
@@ -590,7 +750,7 @@ cvW.addEventListener('pointerdown', (e) => {
   if (!S.segs || e.button === 2) return;
   const r = cvW.getBoundingClientRect(), x = e.clientX - r.left;
   const tol = e.pointerType === 'touch' ? 16 : 7;
-  const i = naheSchnitt(x, r.width, tol);
+  const i = S.ansicht === 'profi' ? naheSchnitt(x, r.width, tol) : -1;
   zug = { x, i, t0: S.view.t0, t1: S.view.t1, moved: false, id: e.pointerId };
   if (i >= 0) { S.drag = i; S.dirty = true; male(); }
   cvW.setPointerCapture(e.pointerId);
@@ -599,7 +759,7 @@ cvW.addEventListener('pointermove', (e) => {
   const r = cvW.getBoundingClientRect(), x = e.clientX - r.left;
   if (!zug) {
     if (!S.segs) return;
-    const h = naheSchnitt(x, r.width, 7);
+    const h = S.ansicht === 'profi' ? naheSchnitt(x, r.width, 7) : -1;
     if (h !== S.hoverCut) { S.hoverCut = h; S.dirty = true; male(); }
     cvW.style.cursor = h >= 0 ? 'ew-resize' : 'crosshair';
     return;
@@ -634,8 +794,10 @@ const loslassen = (e) => {
 };
 cvW.addEventListener('pointerup', loslassen);
 cvW.addEventListener('pointercancel', () => { zug = null; S.drag = -1; });
-cvW.addEventListener('dblclick', (e) => { const r = cvW.getBoundingClientRect(); schnittSetzen(xt(e.clientX - r.left, r.width)); });
+cvW.addEventListener('dblclick', (e) => {
+  if (S.ansicht !== 'profi') return; const r = cvW.getBoundingClientRect(); schnittSetzen(xt(e.clientX - r.left, r.width)); });
 cvW.addEventListener('contextmenu', (e) => {
+  if (S.ansicht !== 'profi') return;
   const r = cvW.getBoundingClientRect(), i = naheSchnitt(e.clientX - r.left, r.width, 9);
   if (i >= 0) { e.preventDefault(); schnittWeg(i); toast('Schnitt entfernt.'); }
 });
@@ -664,7 +826,15 @@ $('#z-aus').addEventListener('click', () => zoom(2));
 $('#z-alles').addEventListener('click', () => setView(0, S.dur));
 $('#cut-add').addEventListener('click', () => schnittSetzen(pos()));
 $('#cut-neu').addEventListener('click', () => { S.cuts = S.autoCuts.map((c) => ({ ...c })); S.sel = -1; neuBerechnen(); toast('Automatisch erkannte Schnitte wiederhergestellt.'); });
-$('#ziel').addEventListener('change', () => { S.levelled = null; zeichneAlles(); if (S.mode === 'neu') modus('neu'); });
+const optionGeaendert = () => { const war = !!S.levelled; S.levelled = null; zeichneAlles(); if (war || S.mode === 'neu') modus(S.mode, true, true).then(() => { if (S.playing) play(pos()); }); };
+$('#ziel').addEventListener('change', optionGeaendert);
+$('#trimmen').addEventListener('change', optionGeaendert);
+$('#korrigieren').addEventListener('click', async (e) => {
+  const btn = e.currentTarget; btn.disabled = true;
+  S.levelled = null;
+  try { await angleichen(); await modus('neu'); } catch (err) { korrekturStatus(null); toast('Korrektur fehlgeschlagen: ' + err.message, 5000); }
+  btn.disabled = false;
+});
 $('#drucken').addEventListener('click', () => window.print());
 $('#laden-wav').addEventListener('click', async (e) => {
   const btn = e.currentTarget;
@@ -676,7 +846,7 @@ $('#laden-wav').addEventListener('click', async (e) => {
     const m = await frage({ cmd: 'wav', channels: chs }, 'wav', chs.map((c) => c.buffer));
     const a = document.createElement('a');
     a.href = URL.createObjectURL(m.blob);
-    a.download = S.file.name.replace(/\.[^.]+$/, '') + ' (angeglichen).wav';
+    a.download = S.file.name.replace(/\.[^.]+$/, '') + ' (korrigiert).wav';
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 60000);
   } catch (err) { toast('Export fehlgeschlagen: ' + err.message, 5000); }

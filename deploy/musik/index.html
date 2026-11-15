@@ -15,7 +15,13 @@
     <svg viewBox="0 0 32 32" aria-hidden="true"><g fill="currentColor"><rect x="6" y="12" width="3" height="8" rx="1.5"/><rect x="11" y="7" width="3" height="18" rx="1.5"/><rect x="16" y="10" width="3" height="12" rx="1.5"/><rect x="21" y="5" width="3" height="22" rx="1.5"/></g></svg>
     <span>Musik-Check</span>
   </div>
-  <button id="neu" class="btn ghost hidden" type="button">Andere Datei</button>
+  <div class="top-rechts">
+    <div class="seg-switch" role="group" aria-label="Ansicht">
+      <button id="v-einfach" type="button">Einfach</button>
+      <button id="v-profi" type="button">Profi</button>
+    </div>
+    <button id="neu" class="btn ghost hidden" type="button">Andere Datei</button>
+  </div>
 </header>
 
 <main>
@@ -48,10 +54,11 @@
         <h2 id="name"></h2>
         <p id="format" class="dim"></p>
       </div>
-      <div id="urteil" class="urteil"></div>
+      <div id="urteil" class="urteil nur-profi"></div>
     </div>
 
-    <div id="zahlen" class="zahlen"></div>
+    <div id="e-urteil" class="e-urteil nur-einfach"></div>
+    <div id="zahlen" class="zahlen nur-profi"></div>
 
     <div class="karte">
       <div class="player">
@@ -59,10 +66,14 @@
         <span id="zeit" class="zeit">0:00 / 0:00</span>
         <div class="seg-switch" role="group" aria-label="Fassung">
           <button id="m-orig" class="on" type="button">Original</button>
-          <button id="m-neu" type="button">Angeglichen</button>
+          <button id="m-neu" type="button">Korrigiert</button>
         </div>
+        <label class="laut" title="Lautstärke der Vorschau">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h4l5-4v14l-5-4H4z" fill="currentColor"/><path d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          <input id="lautstaerke" type="range" min="0" max="100" value="80" aria-label="Lautstärke der Vorschau">
+        </label>
         <span class="flex"></span>
-        <div class="zoom">
+        <div class="zoom nur-profi">
           <button id="z-aus" class="btn icon" type="button" aria-label="Verkleinern">−</button>
           <button id="z-alles" class="btn icon" type="button" aria-label="Ganze Datei">⤢</button>
           <button id="z-ein" class="btn icon" type="button" aria-label="Vergrößern">+</button>
@@ -70,9 +81,9 @@
       </div>
       <div class="wellen">
         <canvas id="welle"></canvas>
-        <canvas id="kurve"></canvas>
+        <canvas id="kurve" class="nur-profi"></canvas>
       </div>
-      <div class="legende">
+      <div class="legende nur-profi">
         <span><i style="background:#2f80ff"></i>Bass</span>
         <span><i style="background:#f5a524"></i>Mitten</span>
         <span><i style="background:#eef2ff"></i>Höhen</span>
@@ -80,7 +91,7 @@
         <span><i style="background:#ef4455"></i>Spitzen / Übersteuerung</span>
         <span><i class="band"></i>Zielbereich ±2 LU</span>
       </div>
-      <div class="werkzeug">
+      <div class="werkzeug nur-profi">
         <button id="cut-add" class="btn" type="button">+ Schnitt an Abspielposition</button>
         <button id="cut-neu" class="btn" type="button">Schnitte neu erkennen</button>
         <span class="dim klein desk">Doppelklick setzt einen Schnitt · Schnittmarke ziehen zum Verschieben · Rechtsklick entfernt</span>
@@ -90,25 +101,31 @@
     <div class="spalten">
       <div class="karte">
         <h3>Aufbau der Datei</h3>
+        <p class="dim klein nur-einfach">Die Musik besteht aus diesen Teilen. Tippe auf einen Teil, um ihn anzuhören.</p>
         <div id="aufbau" class="aufbau"></div>
-        <div class="tabelle-wrap"><table id="teile" class="teile"></table></div>
+        <div class="tabelle-wrap nur-profi"><table id="teile" class="teile"></table></div>
       </div>
       <div class="karte">
-        <h3>Tipps</h3>
+        <h3><span class="nur-profi">Tipps</span><span class="nur-einfach">Was auffällt</span></h3>
         <ul id="tipps" class="tipps"></ul>
-        <div class="angleichen">
-          <h4>Angeglichene Fassung</h4>
-          <p class="dim klein">Bringt alle Teile auf dieselbe Lautheit und begrenzt die Spitzen auf −1 dBFS. Bereits verzerrte Stellen bleiben verzerrt.</p>
-          <label class="feld">Ziel
-            <select id="ziel">
-              <option value="median">wie der Großteil der Datei</option>
-              <option value="-14">−14 LUFS (ruhig)</option>
-              <option value="-11">−11 LUFS (kräftig)</option>
-              <option value="-9">−9 LUFS (sehr laut)</option>
-            </select>
-          </label>
+        <div class="angleichen" id="korrektur">
+          <h4>Automatische Korrektur</h4>
+          <p class="dim klein">Macht alle Teile gleich laut, verhindert Übersteuern und kürzt lange Stille am Anfang und Ende. Bereits verzerrte Stellen kann sie nicht reparieren.</p>
+          <div class="nur-profi">
+            <label class="feld">Ziel
+              <select id="ziel">
+                <option value="median">automatisch (wie der Großteil der Datei)</option>
+                <option value="-14">−14 LUFS (ruhig)</option>
+                <option value="-11">−11 LUFS (kräftig)</option>
+                <option value="-9">−9 LUFS (sehr laut)</option>
+              </select>
+            </label>
+            <label class="haken"><input id="trimmen" type="checkbox" checked> Stille am Anfang (auf 0,1 s) und Ende (auf 1 s) kürzen</label>
+          </div>
+          <div id="k-status" class="k-status hidden"></div>
           <div class="knoepfe">
-            <button id="laden-wav" class="btn primaer" type="button">WAV herunterladen</button>
+            <button id="korrigieren" class="btn primaer" type="button">Automatisch korrigieren</button>
+            <button id="laden-wav" class="btn hidden" type="button">Korrigierte Datei herunterladen</button>
             <button id="drucken" class="btn" type="button">Prüfbericht drucken</button>
           </div>
         </div>

@@ -15,7 +15,7 @@ self.onmessage = (e) => {
       const out = m.segs.map(([a, b]) => K.detectGrid(fr.low, fr.mid, fr.high, a, b));
       self.postMessage({ type: 'bpm', id: m.id, grids: out });
     } else if (m.cmd === 'level') {
-      const out = level(m.gains, m.ceiling, (p) => self.postMessage({ type: 'progress', p }));
+      const out = level(m.gains, m.ceiling, m.trim, (p) => self.postMessage({ type: 'progress', p }));
       self.postMessage({ type: 'levelled', id: m.id, channels: out }, out.map((c) => c.buffer));
     } else if (m.cmd === 'wav') {
       const blob = wav(m.channels, rate);
@@ -120,7 +120,7 @@ function analyse(progress) {
 }
 
 // Angleichen: Verstärkung je Teil (weich übergeblendet) und Limiter
-function level(gains, ceilingDb, progress) {
+function level(gains, ceilingDb, trim, progress) {
   const C = chs.length, n = chs[0].length;
   const frameLen = rate * K.FRAME_MS / 1000;
   const g = new Float32Array(n);
@@ -179,7 +179,16 @@ function level(gains, ceilingDb, progress) {
     }
   }
   progress(1);
-  return out;
+  // Stille kürzen (mit kurzer Blende, damit nichts knackt)
+  const a = Math.max(0, Math.round((trim ? trim[0] : 0) * rate)), b = Math.min(n, Math.round((trim ? trim[1] : n / rate) * rate));
+  if (a === 0 && b === n) return out;
+  const fi = a > 0 ? Math.round(rate * 0.005) : 0, fo = b < n ? Math.round(rate * 0.02) : 0;
+  return out.map((c) => {
+    const r = c.slice(a, b);
+    for (let i = 0; i < fi && i < r.length; i++) r[i] *= i / fi;
+    for (let i = 0; i < fo && i < r.length; i++) r[r.length - 1 - i] *= i / fo;
+    return r;
+  });
 }
 
 function wav(channels, sr) {
