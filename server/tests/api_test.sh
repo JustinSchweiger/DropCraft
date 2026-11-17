@@ -119,7 +119,9 @@ check "wieder offen" "$(code $S)" 200
 check "Ablauf in Vergangenheit" "$(J "${A[@]}" -X PATCH $B/shares/$TOK -d '{"expires_at":1000}' | jq .expires_at)" 1000
 check "abgelaufen" "$(code $S)" 410
 check "Ablauf entfernen" "$(J "${A[@]}" -X PATCH $B/shares/$TOK -d '{"expires_at":0}' | jq .expires_at)" null
-check "Startseite" "$(curl -s http://127.0.0.1:18080/ | grep -c 'Private Cloud')" 1
+check "Startseite Englisch (Standard)" "$(curl -s http://127.0.0.1:18080/ | grep -c 'Open in browser')" 1
+check "Startseite Deutsch" "$(curl -s -H 'Cookie: dc_lang=de' http://127.0.0.1:18080/ | grep -c 'Im Browser öffnen')" 1
+check "Konto-Website" "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/account)" 200
 # Updates
 mkdir -p "$DATA/public" && echo '{"version":"0.1.5"}' > "$DATA/public/latest.json"
 check "Update-Info" "$(curl -s http://127.0.0.1:18080/updates/latest.json | jq -r .version)" "0.1.5"
