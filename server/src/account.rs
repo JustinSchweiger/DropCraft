@@ -43,7 +43,7 @@ pub enum Lang {
 }
 
 impl Lang {
-    fn t<'a>(self, en: &'a str, de: &'a str) -> &'a str {
+    pub(crate) fn t<'a>(self, en: &'a str, de: &'a str) -> &'a str {
         if self == Lang::De {
             de
         } else {
@@ -51,7 +51,7 @@ impl Lang {
         }
     }
 
-    fn code(self) -> &'static str {
+    pub(crate) fn code(self) -> &'static str {
         if self == Lang::De {
             "de"
         } else {
@@ -72,7 +72,7 @@ fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
 }
 
 /// Englisch, außer jemand hat Deutsch gewählt.
-fn lang(headers: &HeaderMap) -> Lang {
+pub(crate) fn lang(headers: &HeaderMap) -> Lang {
     match cookie(headers, LANG_COOKIE).as_deref() {
         Some("de") => Lang::De,
         _ => Lang::En,
@@ -235,7 +235,7 @@ pub struct LangForm {
 
 pub async fn set_lang(headers: HeaderMap, Form(f): Form<LangForm>) -> Response {
     let code = if f.lang == "de" { "de" } else { "en" };
-    let back = if f.back.starts_with("/account") && !f.back.starts_with("//") { f.back } else { "/account".into() };
+    let back = if (f.back == "/" || f.back.starts_with("/account")) && !f.back.starts_with("//") { f.back } else { "/account".into() };
     let mut r = Redirect::to(&back).into_response();
     r.headers_mut().insert(
         header::SET_COOKIE,

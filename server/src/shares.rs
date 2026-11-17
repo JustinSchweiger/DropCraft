@@ -592,29 +592,68 @@ fn app_exe(state: &AppState) -> std::path::PathBuf {
     }
 }
 
-pub async fn landing(State(state): State<AppState>) -> Response {
-    let download = match tokio::fs::metadata(app_exe(&state)).await {
-        Ok(m) => format!(
-            r#"<a class="btn big" href="/download/windows">{ICON_DOWNLOAD}Windows-App herunterladen</a><span class="meta">DropCraft.exe · {}</span>"#,
-            human(m.len() as i64)
-        ),
-        Err(_) => String::new(),
-    };
-    let mac = state.cfg.data_dir.join("public").join("DropCraft-macOS.zip");
-    let download = if mac.exists() {
-        format!(r#"{download}<a class="btn big" href="/updates/DropCraft-macOS.zip">{ICON_DOWNLOAD}Mac-App herunterladen</a>"#)
+/// Startseite: Web-App öffnen, Apps herunterladen (Englisch oder Deutsch,
+/// gleiche Einstellung wie Web-App und Konto-Website).
+pub async fn landing(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    use crate::account::Lang;
+    let l = crate::account::lang(&headers);
+    let de = l == Lang::De;
+    let public = state.cfg.data_dir.join("public");
+    let version: Option<String> = tokio::fs::read_to_string(public.join("latest.json"))
+        .await
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v["version"].as_str().map(str::to_string));
+    let size_of = |p: std::path::PathBuf| async move { tokio::fs::metadata(p).await.ok().map(|m| human_l(de, m.len() as i64)) };
+
+    // Plattform-Knöpfe: (Symbol, „Download für“, Plattform, Link, Größe, Hinweis)
+    let mut buttons = Vec::new();
+    if let Some(size) = size_of(app_exe(&state)).await {
+        buttons.push((ICON_WINDOWS, l.t("Windows 10 and 11", "Windows 10 und 11"), "Windows", "/download/windows", size));
+    }
+    if let Some(size) = size_of(public.join("DropCraft-macOS.zip")).await {
+        buttons.push((ICON_APPLE, l.t("Apple silicon and Intel", "Apple Silicon und Intel"), "macOS", "/updates/DropCraft-macOS.zip", size));
+    }
+    if let Some(size) = size_of(public.join("DropCraft-iOS.ipa")).await {
+        buttons.push((ICON_PHONE, l.t("for SideStore or AltStore", "für SideStore oder AltStore"), "iPhone & iPad", "/updates/DropCraft-iOS.ipa", size));
+    }
+    let downloads = if buttons.is_empty() {
+        String::new()
     } else {
-        download
+        let items: String = buttons
+            .iter()
+            .map(|(icon, note, platform, href, size)| {
+                format!(
+                    r#"<a class="dl" href="{href}" download><span class="dl-ic">{icon}</span><span class="dl-txt"><span class="dl-small">{}</span><span class="dl-big">{platform}</span><span class="dl-meta">{} · {size}</span></span><span class="dl-arrow">{ICON_DOWNLOAD}</span></a>"#,
+                    l.t("Download for", "Download für"),
+                    esc(note),
+                )
+            })
+            .collect();
+        let ver = version.map(|v| format!(" · {} {}", l.t("version", "Version"), esc(&v))).unwrap_or_default();
+        format!(
+            r#"<section class="downloads"><h2 class="dl-title">{}<span class="meta">{}{ver}</span></h2><div class="dl-grid">{items}</div></section>"#,
+            l.t("Get the apps", "Apps herunterladen"),
+            l.t("Free · keeps itself up to date", "Kostenlos · aktualisiert sich selbst"),
+        )
     };
     let site = esc(&crate::settings::load(&state).await.site_name);
+    let other = if de { ("en", "English") } else { ("de", "Deutsch") };
     let body = format!(
         r#"<section class="hero"><div class="hero-logo">{ICON_LOGO_BIG}</div><h1>{site}</h1>
-<p class="lead">Private Cloud zum Synchronisieren und Teilen von Dateien.</p>
-<div class="hero-actions"><a class="btn primary big" href="/app/">Im Browser öffnen</a>{download}</div>
-<p class="meta">Du hast einen Link bekommen? Öffne ihn einfach direkt – dafür brauchst du nichts zu installieren.</p>
-<p class="meta"><a class="link-plain" href="/account">Konto verwalten · Manage account</a></p></section>"#
+<p class="lead">{lead}</p>
+<div class="hero-actions"><a class="btn primary big" href="/app/">{ICON_GLOBE}{open}</a></div>
+<p class="meta">{got_link}</p></section>
+{downloads}
+<footer class="landing-foot"><a class="link-plain" href="/account">{manage}</a><span class="sep">·</span><form method="post" action="/account/lang" class="inline"><input type="hidden" name="lang" value="{other_code}"><input type="hidden" name="back" value="/"><button class="link-plain linkbtn" type="submit">{other_name}</button></form></footer>"#,
+        lead = l.t("Your private cloud for syncing and sharing files.", "Private Cloud zum Synchronisieren und Teilen von Dateien."),
+        open = l.t("Open in browser", "Im Browser öffnen"),
+        got_link = l.t("Got a link? Just open it – you don't need to install anything.", "Du hast einen Link bekommen? Öffne ihn einfach direkt – dafür brauchst du nichts zu installieren."),
+        manage = l.t("Manage account", "Konto verwalten"),
+        other_code = other.0,
+        other_name = other.1,
     );
-    page_html("DropCraft", &body)
+    page_html_lang(l.code(), "DropCraft", &body)
 }
 
 pub async fn download_app(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -745,9 +784,14 @@ fn password_page(token: &str, wrong: bool) -> Response {
 }
 
 fn page_html(title: &str, main: &str) -> Response {
+    page_html_lang("de", title, main)
+}
+
+fn page_html_lang(lang: &str, title: &str, main: &str) -> Response {
+    let full_title = if title == "DropCraft" { title.to_string() } else { format!("{title} · DropCraft") };
     let html = format!(
-        r#"<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="robots" content="noindex"><link rel="icon" href="/app/icon-192.png"><title>{title} · DropCraft</title><style>{CSS}</style></head>
+        r#"<!doctype html><html lang="{lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex"><link rel="icon" href="/app/icon-192.png"><title>{full_title}</title><style>{CSS}</style></head>
 <body><header><a class="brand" href="/">{ICON_LOGO}<span>DROPCRAFT</span></a></header>
 <main>{main}</main></body></html>"#
     );
@@ -1016,6 +1060,11 @@ fn is_viewable(name: &str) -> bool {
 }
 
 /// App-Logo (Tropfen mit Sync-Pfeilen), wie im Programmsymbol (client/desktop/src/icons.rs).
+/// Windows-Logo (vier Fenster), Apple-Logo, Telefon, Globus – für die Startseite.
+const ICON_WINDOWS: &str = r##"<svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M2 4.6 10 3.5v7.8H2zM11 3.4 22 2v9.3H11zM2 12.3h8v7.8l-8-1.1zM11 12.3h11V22l-11-1.5z"/></svg>"##;
+const ICON_APPLE: &str = r##"<svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M16.4 12.6c0-2.6 2.1-3.8 2.2-3.9-1.2-1.8-3.1-2-3.8-2-1.6-.2-3.1.9-3.9.9-.8 0-2-.9-3.4-.9-1.7 0-3.3 1-4.2 2.6-1.8 3.1-.5 7.7 1.3 10.2.9 1.2 1.9 2.6 3.2 2.6 1.3-.1 1.8-.8 3.3-.8 1.6 0 2 .8 3.4.8 1.4 0 2.3-1.3 3.1-2.5 1-1.4 1.4-2.8 1.4-2.9 0 0-2.6-1-2.6-4.1zM13.9 5c.7-.9 1.2-2 1-3.2-1 .1-2.2.7-2.9 1.6-.6.7-1.2 1.9-1 3.1 1.1.1 2.2-.6 2.9-1.5z"/></svg>"##;
+const ICON_PHONE: &str = r##"<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="2.5"/><path d="M10.5 5h3M11 18.5h2"/></svg>"##;
+const ICON_GLOBE: &str = r##"<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M1.8 8h12.4M8 1.8c1.7 1.8 2.5 3.9 2.5 6.2S9.7 12.4 8 14.2C6.3 12.4 5.5 10.3 5.5 8S6.3 3.6 8 1.8z"/></svg>"##;
 pub(crate) const ICON_LOGO: &str = r##"<svg width="24" height="24" viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="dcb" x1="0" y1="0" x2=".35" y2="1"><stop offset="0" stop-color="#1747b8"/><stop offset="1" stop-color="#071538"/></linearGradient><radialGradient id="dcg" cx="61" cy="1" r="22" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#3fd4ff" stop-opacity=".55"/><stop offset="1" stop-color="#3fd4ff" stop-opacity="0"/></radialGradient><linearGradient id="dcd" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5ff4ff"/><stop offset="1" stop-color="#2f7bff"/></linearGradient><linearGradient id="dcv" x1="1" y1="0" x2="0" y2="1"><stop offset=".35" stop-color="#8a5cff" stop-opacity="0"/><stop offset="1" stop-color="#8a5cff" stop-opacity=".6"/></linearGradient><filter id="dcf" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="2.4"/></filter></defs><rect x="1.92" y="1.92" width="60.16" height="60.16" rx="13.24" fill="url(#dcb)"/><rect x="1.92" y="1.92" width="60.16" height="60.16" rx="13.24" fill="url(#dcg)"/><rect x="2.52" y="2.52" width="58.96" height="58.96" rx="12.64" fill="none" stroke="#5aa8ff" stroke-opacity=".4" stroke-width=".8"/><path d="M30.36 9.88A1.92 1.92 0 0 1 33.64 9.88L45.91 29.86A16.32 16.32 0 1 1 18.09 29.86Z" fill="#29d9ff" opacity=".45" filter="url(#dcf)"/><path d="M30.36 9.88A1.92 1.92 0 0 1 33.64 9.88L45.91 29.86A16.32 16.32 0 1 1 18.09 29.86Z" fill="url(#dcd)"/><path d="M30.36 9.88A1.92 1.92 0 0 1 33.64 9.88L45.91 29.86A16.32 16.32 0 1 1 18.09 29.86Z" fill="url(#dcv)"/><path d="M24.48 35.98A8 8 0 0 1 38.93 34.72M39.52 41.46A8 8 0 0 1 25.07 42.72" fill="none" stroke="#fff" stroke-width="2.88" stroke-linecap="round"/><path d="M41.09 38.46L42.36 32.74L35.49 36.7ZM22.91 38.98L21.64 44.7L28.51 40.74Z" fill="#fff"/></svg>"##;
 const ICON_FOLDER: &str = r##"<svg width="20" height="20" viewBox="0 0 16 16" fill="#0c5c64" stroke="#19e3f0" stroke-width="1.2" stroke-linejoin="round" aria-hidden="true"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg>"##;
 const ICON_FILE: &str = r##"<svg width="20" height="20" viewBox="0 0 16 16" fill="none" stroke="#95a2b0" stroke-width="1.2" stroke-linejoin="round" aria-hidden="true"><path d="M4 1.5h5l3 3v10H4z"/><path d="M9 1.5v3h3"/></svg>"##;
@@ -1092,6 +1141,23 @@ audio.viewer-media{width:100%;margin:40px 16px}
 .hero h1{font-size:36px;margin:0}
 .lead{font-size:18px;color:#95a2b0;margin:0}
 .link-plain{color:#95a2b0}.link-plain:hover{color:#19e3f0}
+.downloads{max-width:720px;margin:0 auto 24px}
+.dl-title{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:8px;font-size:13px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:#95a2b0;margin:0 0 10px}
+.dl-title .meta{text-transform:none;letter-spacing:0;font-weight:400}
+.dl-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}
+.dl{display:flex;align-items:center;gap:12px;padding:14px 14px 14px 16px;border:1px solid #28303a;border-radius:10px;background:#12161c;color:#e6ecf2;text-decoration:none;transition:border-color .12s,background .12s}
+.dl:hover{border-color:#19e3f0;background:#0f1d22}
+.dl-ic{width:40px;height:40px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;border-radius:8px;background:#1a2028;color:#e6ecf2}
+.dl:hover .dl-ic{color:#19e3f0}
+.dl-txt{flex:1;min-width:0;display:flex;flex-direction:column;line-height:1.25}
+.dl-small{font-size:11px;color:#95a2b0}
+.dl-big{font-size:17px;font-weight:600}
+.dl-meta{font-size:11px;color:#55606c;margin-top:2px}
+.dl-arrow{color:#55606c;display:flex}.dl:hover .dl-arrow{color:#19e3f0}
+.btn.big svg{margin-right:2px}
+.landing-foot{display:flex;justify-content:center;align-items:center;gap:6px;margin:8px 0 0;font-size:13px}
+.inline{display:inline;margin:0}
+.linkbtn{background:none;border:0;padding:0;font:inherit;cursor:pointer;text-decoration:underline}
 .hero-actions{display:flex;flex-direction:column;align-items:center;gap:8px;margin:16px 0}
 .btn.big{height:48px;padding:0 20px;font-size:13px}
 .pw{display:flex;flex-direction:column;gap:12px;width:100%;max-width:320px;text-align:left}
