@@ -37,7 +37,7 @@ and an Explorer menu, share links with a web gallery, a web app and a native iPh
 | 📱 **iPhone & iPad** | Native SwiftUI app: browse, preview, upload from Photos and Files, manage links and users |
 | 🌐 **Web app** | Installable web app under `/app/` for any browser |
 | 🛡️ **Account website** | `/account` on your server: storage, password, signed-in devices and share links for everyone; users, quotas, disabling accounts and server settings for admins. One click from the apps, already signed in |
-| 🌍 **English & Deutsch** | The Windows and macOS app, the Explorer menu and the account website in English (default) or German |
+| 🌍 **English & Deutsch** | The Windows and macOS app, the Explorer menu, the web app and the account website in English (default) or German |
 | 🔄 **Install & updates** | `DropCraft.exe` installs itself without admin rights and keeps itself up to date |
 | 🐳 **Server** | axum + SQLite, files stored as blobs per account, Docker with Caddy for automatic HTTPS, deployed by GitHub Actions |
 | 🎵 **Musik-Check** | Bonus page that checks spliced music files for loudness (EBU R128), clipping and cuts, entirely in the browser |

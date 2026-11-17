@@ -177,3 +177,5 @@ button.row:active, a.row:active { background: var(--hover); }
   button.row:hover, a.row:hover { background: var(--hover); }
   .iconbtn:hover { background: var(--raised); }
 }
+
+.linkbtn{background:none;border:0;padding:0;color:#95a2b0;font:inherit;text-decoration:underline;cursor:pointer}

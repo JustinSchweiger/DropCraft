@@ -54,7 +54,16 @@ to trust that certificate, and deletes the certificate's private key right away,
 can ever be signed with it. The menu itself is a small DLL (`DropCraftShell.dll`) next to
 `DropCraft.exe`; it is part of the program and is updated with it.
 
-Set it up during installation or later under *Settings › Explorer menu*. Uninstalling
+Set it up during installation or later under *Settings › Explorer menu*. Explorer only loads new
+entries when it starts, so the setup offers to restart it (open Explorer windows close).
+
+Newer Windows 11 versions group app entries under **App-Erweiterungen / App extensions**. Under
+*Settings › Personalization › Context menu* you choose whether DropCraft appears there or directly
+in the main menu.
+
+**Troubleshooting:** create an empty file `%APPDATA%\DropCraft\shell-debug`, right-click again and
+read `%TEMP%\DropCraftShell.log`: it lists every call Explorer makes to the menu. Delete the file
+afterwards. Uninstalling
 DropCraft removes the package; the trusted certificate stays but is useless without its key.
 
 On Windows 10, and on Windows 11 under *Show more options*, the classic entry

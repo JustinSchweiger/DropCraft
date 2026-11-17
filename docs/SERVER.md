@@ -32,7 +32,8 @@ create just that one account.
 
 ## Account website
 
-`https://<domain>/account`, in English (default) or German. Sign in with any account, or use
+`https://<domain>/account`, in English (default) or German (the web app under `/app/` shares the
+choice). Sign in with any account, or use
 *Manage account* in the Windows, macOS, iOS or web app, which opens it already signed in (a
 one-time code, valid for two minutes).
 

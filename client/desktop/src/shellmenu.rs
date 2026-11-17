@@ -105,12 +105,27 @@ pub fn ensure_dll(dir: &Path) -> Result<(), String> {
     std::fs::rename(&tmp, &dll).map_err(|e| format!("{}: {e}", dll.display()))
 }
 
+/// Logos des Pakets auch in den Programmordner legen: Bei Paketen mit
+/// externem Ort sucht Windows (Einstellungen › Kontextmenü) sie dort.
+pub fn ensure_assets(dir: &Path) {
+    let assets = dir.join("Assets");
+    let _ = std::fs::create_dir_all(&assets);
+    for (name, size) in [("StoreLogo.png", 50u32), ("Square44.png", 44), ("Square150.png", 150)] {
+        let png = crate::icons::png_bytes(&crate::icons::logo_rgba(size), size);
+        let path = assets.join(name);
+        if std::fs::read(&path).ok().as_deref() != Some(png.as_slice()) {
+            let _ = std::fs::write(&path, png);
+        }
+    }
+}
+
 /// Beim Start der installierten App: DLL aktuell halten, Reste entfernen.
 pub fn refresh(dir: &Path) {
     if !supported() || !is_set_up() {
         return;
     }
     let _ = ensure_dll(dir);
+    ensure_assets(dir);
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             let n = e.file_name().to_string_lossy().to_string();
@@ -127,6 +142,7 @@ pub fn setup(dir: &Path) -> Result<(), String> {
         return Err(crate::i18n::t("The Explorer menu needs Windows 11.", "Das Explorer-Menü gibt es erst ab Windows 11.").into());
     }
     ensure_dll(dir)?;
+    ensure_assets(dir);
     let work = std::env::temp_dir().join(format!("dropcraft-menu-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;

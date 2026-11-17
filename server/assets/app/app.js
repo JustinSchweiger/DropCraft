@@ -7,6 +7,22 @@
   const $sheet = document.getElementById('sheet-root');
   const $toast = document.getElementById('toast');
 
+  // ------------------------------------------------------------ Sprache
+
+  // Englisch (Standard) oder Deutsch. Dasselbe Cookie wie die Konto-Website,
+  // damit eine Wahl für beide gilt.
+  const readLang = () => (/(?:^|;\s*)dc_lang=de(?:;|$)/.test(document.cookie) ? 'de' : 'en');
+  let LANG = readLang();
+  const L = (en, de) => (LANG === 'de' ? de : en);
+  const LOC = () => (LANG === 'de' ? 'de-DE' : 'en-US');
+  function setLang(code) {
+    LANG = code === 'de' ? 'de' : 'en';
+    document.cookie = `dc_lang=${LANG}; Path=/; Max-Age=31536000; SameSite=Lax${location.protocol === 'https:' ? '; Secure' : ''}`;
+    document.documentElement.lang = LANG;
+    route();
+  }
+  document.documentElement.lang = LANG;
+
   // ------------------------------------------------------------ Hilfen
 
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -20,22 +36,22 @@
     const u = ['KB', 'MB', 'GB', 'TB'];
     let v = b / 1024, i = 0;
     while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
-    return v.toLocaleString('de-DE', { maximumFractionDigits: v < 10 ? 1 : 0 }) + ' ' + u[i];
+    return v.toLocaleString(LOC(), { maximumFractionDigits: v < 10 ? 1 : 0 }) + ' ' + u[i];
   }
 
   function date(ms) {
     const d = new Date(ms), now = new Date();
-    if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
-    return d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
+    if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString(LOC(), { hour: '2-digit', minute: '2-digit' });
+    return d.toLocaleDateString(LOC(), { day: '2-digit', month: '2-digit', year: 'numeric' });
   }
 
   function expiry(ms) {
     const left = ms - Date.now();
-    if (left <= 0) return 'abgelaufen';
+    if (left <= 0) return L('expired', 'abgelaufen');
     const h = Math.floor(left / 3600000);
-    const rest = h < 1 ? 'unter 1 Stunde' : h === 1 ? 'noch 1 Stunde' : h < 48 ? `noch ${h} Stunden` : `noch ${Math.floor(h / 24)} Tage`;
+    const rest = h < 1 ? L('under 1 hour', 'unter 1 Stunde') : h === 1 ? L('1 hour left', 'noch 1 Stunde') : h < 48 ? L(`${h} hours left`, `noch ${h} Stunden`) : L(`${Math.floor(h / 24)} days left`, `noch ${Math.floor(h / 24)} Tage`);
     const d = new Date(ms);
-    return `bis ${d.toLocaleDateString('de-DE')}, ${d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })} · ${rest}`;
+    return `${L('until', 'bis')} ${d.toLocaleDateString(LOC())}, ${d.toLocaleTimeString(LOC(), { hour: '2-digit', minute: '2-digit' })} · ${rest}`;
   }
 
   let toastTimer;
@@ -111,20 +127,21 @@
     try {
       r = await fetch(url, { method, headers, body: json !== undefined ? JSON.stringify(json) : undefined });
     } catch {
-      throw new ApiError(0, 'Keine Verbindung zum Server.');
+      throw new ApiError(0, L('No connection to the server.', 'Keine Verbindung zum Server.'));
     }
     if (r.status === 401 && path !== '/auth/login') {
       store.token = null;
       state.me = null;
       route();
-      throw new ApiError(401, 'Bitte neu anmelden.');
+      throw new ApiError(401, L('Please sign in again.', 'Bitte neu anmelden.'));
     }
     if (!r.ok) {
       let msg = '';
       try { msg = (await r.json()).message || ''; } catch {}
-      if (r.status === 507) msg = msg || 'Kein Speicherplatz mehr frei.';
-      if (r.status === 401) msg = msg || 'Benutzername oder Passwort falsch.';
-      throw new ApiError(r.status, msg || `Fehler (${r.status})`);
+      if (r.status === 507) msg = L('No storage space left.', 'Kein Speicherplatz mehr frei.');
+      if (r.status === 401) msg = L('Wrong username or password.', 'Benutzername oder Passwort falsch.');
+      if (r.status === 403 && path === '/auth/login') msg = L('This account is disabled.', 'Dieses Konto ist gesperrt.');
+      throw new ApiError(r.status, msg || `${L('Error', 'Fehler')} (${r.status})`);
     }
     const ct = r.headers.get('content-type') || '';
     return ct.includes('json') ? r.json() : null;
@@ -162,9 +179,9 @@
 <header class="bar"><div class="side">${left}</div><h1>${esc(title)}</h1><div class="side right">${right}</div></header>
 <main class="main" id="main">${body}</main>
 <nav class="tabs">
-<a href="#/files" class="${tab === 'files' ? 'on' : ''}">${ic('folder', 22)}Dateien</a>
-<a href="#/shares" class="${tab === 'shares' ? 'on' : ''}">${ic('link', 22)}Freigaben</a>
-<a href="#/account" class="${tab === 'account' ? 'on' : ''}">${ic('user', 22)}Konto</a>
+<a href="#/files" class="${tab === 'files' ? 'on' : ''}">${ic('folder', 22)}${L('Files', 'Dateien')}</a>
+<a href="#/shares" class="${tab === 'shares' ? 'on' : ''}">${ic('link', 22)}${L('Shares', 'Freigaben')}</a>
+<a href="#/account" class="${tab === 'account' ? 'on' : ''}">${ic('user', 22)}${L('Account', 'Konto')}</a>
 </nav></div>`;
     return document.getElementById('main');
   }
@@ -176,13 +193,15 @@
 <img class="logo" src="/app/icon-180.png" alt="">
 <h1>DropCraft</h1>
 <div class="group">
-<div class="field"><label for="u">Benutzername</label><input class="input" id="u" autocomplete="username" autocapitalize="none" autocorrect="off" required></div>
-<div class="field"><label for="p">Passwort</label><input class="input" id="p" type="password" autocomplete="current-password" required></div>
+<div class="field"><label for="u">${L('Username', 'Benutzername')}</label><input class="input" id="u" autocomplete="username" autocapitalize="none" autocorrect="off" required></div>
+<div class="field"><label for="p">${L('Password', 'Passwort')}</label><input class="input" id="p" type="password" autocomplete="current-password" required></div>
 </div>
 <div class="error" id="err" hidden></div>
-<button class="btn primary block" id="go">Anmelden</button>
-<p class="hint">Tipp: In Safari über Teilen → „Zum Home-Bildschirm“ wird DropCraft zur App.</p>
+<button class="btn primary block" id="go">${L('Sign in', 'Anmelden')}</button>
+<p class="hint">${L('Tip: in Safari, Share → “Add to Home Screen” turns DropCraft into an app.', 'Tipp: In Safari über Teilen → „Zum Home-Bildschirm“ wird DropCraft zur App.')}</p>
+<p class="hint"><button type="button" class="linkbtn" id="lang">${L('Deutsch', 'English')}</button></p>
 </form>`;
+    document.getElementById('lang').onclick = () => setLang(LANG === 'de' ? 'en' : 'de');
     const form = document.getElementById('login');
     form.addEventListener('submit', async (ev) => {
       ev.preventDefault();
@@ -230,8 +249,8 @@
   async function renderFolder(dir) {
     currentDir = dir;
     const title = dir ? baseName(dir) : 'DropCraft';
-    const left = dir ? `<a class="iconbtn text" href="#/files/${encodeURIComponent(parent(dir))}" aria-label="Zurück">${ic('back', 20)}</a>` : '';
-    const right = `<button class="iconbtn" id="add" aria-label="Hinzufügen">${ic('plus', 22)}</button>`;
+    const left = dir ? `<a class="iconbtn text" href="#/files/${encodeURIComponent(parent(dir))}" aria-label="${L('Back', 'Zurück')}">${ic('back', 20)}</a>` : '';
+    const right = `<button class="iconbtn" id="add" aria-label="${L('Add', 'Hinzufügen')}">${ic('plus', 22)}</button>`;
     const main = shell(title, { left, right, tab: 'files', body: transfersHtml() + '<div class="spinner"></div>' });
     paintTransfers();
     document.getElementById('add').onclick = () => addMenu(dir);
@@ -251,15 +270,15 @@
         const icon = `<span class="ic ${it.is_dir ? 'folder' : ''}">${ic(fileIcon(it.name, it.is_dir))}</span>`;
         return `<div class="item">
 <button class="row open" data-i="${i}">${icon}<span class="txt"><span class="name">${esc(it.name)}</span><span class="meta">${esc(meta)}</span></span></button>
-<button class="iconbtn more" data-i="${i}" aria-label="Aktionen">${ic('more', 20)}</button></div>`;
+<button class="iconbtn more" data-i="${i}" aria-label="${L('Actions', 'Aktionen')}">${ic('more', 20)}</button></div>`;
       })
       .join('');
     const files = items.filter((i) => !i.is_dir);
     main.innerHTML =
       transfersHtml() +
       (items.length
-        ? `<div class="group list">${rows}</div><div class="foot">${items.length} Einträge · ${size(files.reduce((a, b) => a + b.size, 0))}</div>`
-        : `<div class="empty">${ic('folder', 48)}Leerer Ordner.<br>Mit + Fotos oder Dateien hochladen.</div>`);
+        ? `<div class="group list">${rows}</div><div class="foot">${items.length} ${L(items.length === 1 ? 'item' : 'items', items.length === 1 ? 'Eintrag' : 'Einträge')} · ${size(files.reduce((a, b) => a + b.size, 0))}</div>`
+        : `<div class="empty">${ic('folder', 48)}${L('Empty folder.<br>Upload photos or files with +.', 'Leerer Ordner.<br>Mit + Fotos oder Dateien hochladen.')}</div>`);
     paintTransfers();
     main.querySelectorAll('button.open').forEach((b) => (b.onclick = () => openItem(items[+b.dataset.i])));
     main.querySelectorAll('button.more').forEach((b) => (b.onclick = () => itemMenu(items[+b.dataset.i])));
@@ -301,10 +320,10 @@
       k === 'image' ? `<img src="${esc(url)}" alt="">`
       : k === 'video' ? `<video src="${esc(url)}" controls playsinline autoplay></video>`
       : k === 'audio' ? `<audio src="${esc(url)}" controls autoplay></audio>`
-      : `<div class="other">${ic(fileIcon(it.name, false), 56)}<p>${esc(it.name)}<br>${size(it.size)}</p><a class="btn primary" href="${esc(url)}" target="_blank" rel="noopener">Öffnen</a></div>`;
+      : `<div class="other">${ic(fileIcon(it.name, false), 56)}<p>${esc(it.name)}<br>${size(it.size)}</p><a class="btn primary" href="${esc(url)}" target="_blank" rel="noopener">${L('Open', 'Öffnen')}</a></div>`;
     const el = document.createElement('div');
     el.className = 'viewer';
-    el.innerHTML = `<div class="vbar"><button class="iconbtn" id="vclose" aria-label="Schließen">${ic('close', 20)}</button><h2>${esc(it.name)}</h2><button class="iconbtn" id="vmore" aria-label="Aktionen">${ic('share', 20)}</button></div><div class="stage">${stage}</div>`;
+    el.innerHTML = `<div class="vbar"><button class="iconbtn" id="vclose" aria-label="${L('Close', 'Schließen')}">${ic('close', 20)}</button><h2>${esc(it.name)}</h2><button class="iconbtn" id="vmore" aria-label="${L('Actions', 'Aktionen')}">${ic('share', 20)}</button></div><div class="stage">${stage}</div>`;
     document.body.appendChild(el);
     const close = () => { el.querySelectorAll('video,audio').forEach((m) => m.pause()); el.remove(); };
     el.querySelector('#vclose').onclick = close;
@@ -319,7 +338,7 @@
   function actionSheet(title, actions) {
     $sheet.innerHTML = `<div class="backdrop"><div class="sheet"><div class="group">${title ? `<div class="title">${esc(title)}</div>` : ''}${actions
       .map((a, i) => `<button class="row ${a.danger ? 'danger' : ''}" data-i="${i}">${esc(a.label)}</button>`)
-      .join('')}</div><div class="group"><button class="row cancel">Abbrechen</button></div></div></div>`;
+      .join('')}</div><div class="group"><button class="row cancel">${L('Cancel', 'Abbrechen')}</button></div></div></div>`;
     const bd = $sheet.querySelector('.backdrop');
     bd.onclick = (e) => { if (e.target === bd) closeSheet(); };
     $sheet.querySelector('.cancel').onclick = closeSheet;
@@ -331,7 +350,7 @@
     return new Promise((resolve) => {
       $sheet.innerHTML = `<div class="backdrop center"><form class="dialog"><div class="dbody"><h3>${esc(title)}</h3>${text ? `<p>${esc(text)}</p>` : ''}${
         input !== null ? `<input class="input" type="${type}" id="dlg-in" placeholder="${esc(placeholder)}" autocapitalize="none" autocorrect="off">` : ''
-      }</div><div class="dbtns"><button type="button" id="dlg-no">Abbrechen</button><button type="submit" class="${danger ? 'danger' : ''}">${esc(ok)}</button></div></form></div>`;
+      }</div><div class="dbtns"><button type="button" id="dlg-no">${L('Cancel', 'Abbrechen')}</button><button type="submit" class="${danger ? 'danger' : ''}">${esc(ok)}</button></div></form></div>`;
       const bd = $sheet.querySelector('.backdrop');
       bd.style.alignItems = 'center';
       const inp = $sheet.querySelector('#dlg-in');
@@ -346,18 +365,18 @@
 
   function addMenu(dir) {
     actionSheet(null, [
-      { label: 'Fotos oder Dateien hochladen', run: () => pickFiles(dir) },
-      { label: 'Neuer Ordner', run: () => newFolder(dir) },
-      ...(dir ? [{ label: 'Diesen Ordner freigeben', run: () => shareLink(dir) }] : []),
+      { label: L('Upload photos or files', 'Fotos oder Dateien hochladen'), run: () => pickFiles(dir) },
+      { label: L('New folder', 'Neuer Ordner'), run: () => newFolder(dir) },
+      ...(dir ? [{ label: L('Share this folder', 'Diesen Ordner freigeben'), run: () => shareLink(dir) }] : []),
     ]);
   }
 
   function itemMenu(it, closeViewer) {
-    const acts = [{ label: 'Link kopieren', run: () => shareLink(it.path) }];
-    if (navigator.share) acts.push({ label: 'Link senden …', run: () => shareLink(it.path, true) });
-    if (!it.is_dir) acts.push({ label: 'Herunterladen', run: () => download(it) });
-    acts.push({ label: 'Umbenennen', run: () => rename(it) });
-    acts.push({ label: 'Löschen', danger: true, run: () => remove(it, closeViewer) });
+    const acts = [{ label: L('Copy link', 'Link kopieren'), run: () => shareLink(it.path) }];
+    if (navigator.share) acts.push({ label: L('Send link …', 'Link senden …'), run: () => shareLink(it.path, true) });
+    if (!it.is_dir) acts.push({ label: L('Download', 'Herunterladen'), run: () => download(it) });
+    acts.push({ label: L('Rename', 'Umbenennen'), run: () => rename(it) });
+    acts.push({ label: L('Delete', 'Löschen'), danger: true, run: () => remove(it, closeViewer) });
     actionSheet(it.name, acts);
   }
 
@@ -372,9 +391,9 @@
       }
       try {
         await navigator.clipboard.writeText(url);
-        toast(`Link für „${baseName(path)}“ kopiert`);
+        toast(L(`Link for “${baseName(path)}” copied`, `Link für „${baseName(path)}“ kopiert`));
       } catch {
-        await dialog({ title: 'Link', text: url, ok: 'Fertig' });
+        await dialog({ title: 'Link', text: url, ok: L('Done', 'Fertig') });
       }
     } catch (e) { fail(e); }
   }
@@ -392,19 +411,19 @@
   }
 
   async function newFolder(dir) {
-    const name = await dialog({ title: 'Neuer Ordner', input: '', placeholder: 'Name', ok: 'Anlegen' });
+    const name = await dialog({ title: L('New folder', 'Neuer Ordner'), input: '', placeholder: L('Name', 'Name'), ok: L('Create', 'Anlegen') });
     if (!name) return;
     try { await api('POST', '/files/mkdir', { json: { path: join(dir, name) } }); route(); } catch (e) { fail(e); }
   }
 
   async function rename(it) {
-    const name = await dialog({ title: 'Umbenennen', input: it.name, ok: 'Umbenennen' });
+    const name = await dialog({ title: L('Rename', 'Umbenennen'), input: it.name, ok: L('Rename', 'Umbenennen') });
     if (!name || name === it.name) return;
     try { await api('POST', '/files/move', { json: { from: it.path, to: join(parent(it.path), name) } }); route(); } catch (e) { fail(e); }
   }
 
   async function remove(it, closeViewer) {
-    const ok = await dialog({ title: `„${it.name}“ löschen?`, text: 'Wird auf allen Geräten gelöscht.', ok: 'Löschen', danger: true });
+    const ok = await dialog({ title: L(`Delete “${it.name}”?`, `„${it.name}“ löschen?`), text: L('It is deleted on all devices.', 'Wird auf allen Geräten gelöscht.'), ok: L('Delete', 'Löschen'), danger: true });
     if (!ok) return;
     try {
       await api('POST', '/files/delete', { json: { path: it.path } });
@@ -453,7 +472,7 @@
     };
     await Promise.all(Array.from({ length: Math.min(3, jobs.length) }, worker));
     if (currentDir === dir) route();
-    toast(jobs.length === 1 ? `„${jobs[0].name}“ hochgeladen` : `${jobs.length} Dateien hochgeladen`);
+    toast(jobs.length === 1 ? L(`“${jobs[0].name}” uploaded`, `„${jobs[0].name}“ hochgeladen`) : L(`${jobs.length} files uploaded`, `${jobs.length} Dateien hochgeladen`));
   }
 
   function uploadOne(dir, job) {
@@ -470,9 +489,9 @@
         if (x.status >= 200 && x.status < 300) return resolve();
         let msg = '';
         try { msg = JSON.parse(x.responseText).message; } catch {}
-        reject(new Error(x.status === 507 ? 'Kein Speicherplatz mehr frei.' : msg || `Upload fehlgeschlagen (${x.status})`));
+        reject(new Error(x.status === 507 ? L('No storage space left.', 'Kein Speicherplatz mehr frei.') : msg || `${L('Upload failed', 'Upload fehlgeschlagen')} (${x.status})`));
       };
-      x.onerror = () => reject(new Error('Verbindung abgebrochen.'));
+      x.onerror = () => reject(new Error(L('Connection lost.', 'Verbindung abgebrochen.')));
       x.send(job.file);
     });
   }
@@ -482,23 +501,23 @@
   function chipsHtml(s) {
     const c = [];
     if (s.allow_upload) c.push(`<span class="chip accent">${ic('upload', 10)}Upload</span>`);
-    if (s.has_password) c.push(`<span class="chip">${ic('lock', 10)}Passwort</span>`);
+    if (s.has_password) c.push(`<span class="chip">${ic('lock', 10)}${L('Password', 'Passwort')}</span>`);
     if (s.expires_at) {
       const left = s.expires_at - Date.now();
-      if (left <= 0) c.push(`<span class="chip danger">${ic('clock', 10)}abgelaufen</span>`);
-      else if (left < 86400000) c.push(`<span class="chip warn">${ic('clock', 10)}läuft heute ab</span>`);
-      else c.push(`<span class="chip">${ic('clock', 10)}noch ${Math.floor(left / 86400000)} Tage</span>`);
+      if (left <= 0) c.push(`<span class="chip danger">${ic('clock', 10)}${L('expired', 'abgelaufen')}</span>`);
+      else if (left < 86400000) c.push(`<span class="chip warn">${ic('clock', 10)}${L('expires today', 'läuft heute ab')}</span>`);
+      else c.push(`<span class="chip">${ic('clock', 10)}${L(`${Math.floor(left / 86400000)} days left`, `noch ${Math.floor(left / 86400000)} Tage`)}</span>`);
     }
     if (s.notify) c.push(`<span class="chip">${ic('bell', 10)}</span>`);
     return `<span class="chips">${c.join('')}</span>`;
   }
 
   async function renderShares() {
-    const main = shell('Freigaben', { tab: 'shares', body: '<div class="spinner"></div>' });
+    const main = shell(L('Shares', 'Freigaben'), { tab: 'shares', body: '<div class="spinner"></div>' });
     try { state.shares = await api('GET', '/shares'); } catch (e) { main.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
     const list = state.shares;
     if (!list.length) {
-      main.innerHTML = `<div class="empty">${ic('link', 48)}Noch nichts freigegeben.<br>Bei einer Datei oder einem Ordner auf ··· tippen und „Link kopieren“ wählen.</div>`;
+      main.innerHTML = `<div class="empty">${ic('link', 48)}${L('Nothing shared yet.<br>Tap ··· on a file or folder and choose “Copy link”.', 'Noch nichts freigegeben.<br>Bei einer Datei oder einem Ordner auf ··· tippen und „Link kopieren“ wählen.')}</div>`;
       return;
     }
     main.innerHTML = `<div class="group">${list
@@ -507,60 +526,60 @@
         const isDir = !name.includes('.');
         return `<a class="row" href="#/shares/${encodeURIComponent(s.token)}"><span class="ic ${isDir ? 'folder' : ''}">${ic(fileIcon(name, isDir))}</span><span class="txt"><span class="name">${esc(name)}</span>${chipsHtml(s)}</span><span class="chev">${ic('chev', 16)}</span></a>`;
       })
-      .join('')}</div><div class="foot">${list.length} ${list.length === 1 ? 'aktiver Link' : 'aktive Links'}</div>`;
+      .join('')}</div><div class="foot">${list.length} ${list.length === 1 ? L('active link', 'aktiver Link') : L('active links', 'aktive Links')}</div>`;
   }
 
   async function renderShare(token) {
-    const left = `<a class="iconbtn text" href="#/shares" aria-label="Zurück">${ic('back', 20)}</a>`;
-    const main = shell('Freigabe', { left, tab: 'shares', body: '<div class="spinner"></div>' });
+    const left = `<a class="iconbtn text" href="#/shares" aria-label="${L('Back', 'Zurück')}">${ic('back', 20)}</a>`;
+    const main = shell(L('Share', 'Freigabe'), { left, tab: 'shares', body: '<div class="spinner"></div>' });
     let s;
     try { s = (await api('GET', '/shares')).find((x) => x.token === token); } catch (e) { return fail(e); }
-    if (!s) { main.innerHTML = '<div class="empty">Freigabe nicht gefunden.</div>'; return; }
+    if (!s) { main.innerHTML = `<div class="empty">${L('Share not found.', 'Freigabe nicht gefunden.')}</div>`; return; }
     document.querySelector('.bar h1').textContent = baseName(s.path);
     const url = location.origin + '/s/' + s.token;
     const exp = s.expires_at;
-    const days = [['Immer', 0], ['1 Tag', 1], ['7 Tage', 7], ['30 Tage', 30]];
+    const days = [[L('Always', 'Immer'), 0], [L('1 day', '1 Tag'), 1], [L('7 days', '7 Tage'), 7], [L('30 days', '30 Tage'), 30]];
     main.innerHTML = `
 <div class="label">Link</div>
 <div class="group">
 <a class="row" href="${esc(url)}" target="_blank" rel="noopener"><span class="txt"><span class="name accent">${esc(url)}</span><span class="meta">${esc(s.path)}</span></span></a>
-<button class="row accent" id="copy">${ic('link')}Link kopieren</button>
-${navigator.share ? `<button class="row accent" id="send">${ic('share')}Link senden …</button>` : ''}
+<button class="row accent" id="copy">${ic('link')}${L('Copy link', 'Link kopieren')}</button>
+${navigator.share ? `<button class="row accent" id="send">${ic('share')}${L('Send link …', 'Link senden …')}</button>` : ''}
 </div>
-<div class="label">Einstellungen</div>
+<div class="label">${L('Settings', 'Einstellungen')}</div>
 <div class="group">
-<label class="row">${ic('upload')}<span class="txt">Gäste dürfen hochladen</span><span class="switch"><input type="checkbox" id="up" ${s.allow_upload ? 'checked' : ''}><span></span></span></label>
-<label class="row">${ic('bell')}<span class="txt">Benachrichtigen</span><span class="switch"><input type="checkbox" id="nt" ${s.notify ? 'checked' : ''}><span></span></span></label>
+<label class="row">${ic('upload')}<span class="txt">${L('Guests may upload', 'Gäste dürfen hochladen')}</span><span class="switch"><input type="checkbox" id="up" ${s.allow_upload ? 'checked' : ''}><span></span></span></label>
+<label class="row">${ic('bell')}<span class="txt">${L('Notify', 'Benachrichtigen')}</span><span class="switch"><input type="checkbox" id="nt" ${s.notify ? 'checked' : ''}><span></span></span></label>
 </div>
-<div class="label">Passwort</div>
+<div class="label">${L('Password', 'Passwort')}</div>
 <div class="group">
-<div class="row">${ic('lock')}<span class="txt">${s.has_password ? 'Geschützt' : 'Kein Passwort'}</span>
-${s.has_password ? '<button class="iconbtn text" id="pwdel">Entfernen</button>' : ''}<button class="iconbtn text" id="pwset">${s.has_password ? 'Ändern' : 'Festlegen'}</button></div>
+<div class="row">${ic('lock')}<span class="txt">${s.has_password ? L('Protected', 'Geschützt') : L('No password', 'Kein Passwort')}</span>
+${s.has_password ? `<button class="iconbtn text" id="pwdel">${L('Remove', 'Entfernen')}</button>` : ''}<button class="iconbtn text" id="pwset">${s.has_password ? L('Change', 'Ändern') : L('Set', 'Festlegen')}</button></div>
 </div>
-<div class="label">Gültigkeit</div>
+<div class="label">${L('Valid', 'Gültigkeit')}</div>
 <div class="group"><div class="field"><div class="seg" id="seg">${days
       .map(([l, d]) => `<button data-d="${d}" class="${d === 0 && !exp ? 'on' : ''}">${l}</button>`)
       .join('')}</div>${exp ? `<label>${esc(expiry(exp))}</label>` : ''}</div></div>
 <div class="label"></div>
-<div class="group"><button class="row danger" id="del">Freigabe beenden</button></div>`;
+<div class="group"><button class="row danger" id="del">${L('End link', 'Freigabe beenden')}</button></div>`;
     const update = async (body, msg) => {
       try { await api('PATCH', '/shares/' + token, { json: body }); if (msg) toast(msg); route(); } catch (e) { fail(e); }
     };
     main.querySelector('#copy').onclick = async () => {
-      try { await navigator.clipboard.writeText(url); toast('Link kopiert'); } catch { await dialog({ title: 'Link', text: url, ok: 'Fertig' }); }
+      try { await navigator.clipboard.writeText(url); toast(L('Link copied', 'Link kopiert')); } catch { await dialog({ title: 'Link', text: url, ok: L('Done', 'Fertig') }); }
     };
     const send = main.querySelector('#send');
     if (send) send.onclick = () => navigator.share({ title: baseName(s.path), url }).catch(() => {});
     main.querySelector('#up').onchange = (e) => update({ allow_upload: e.target.checked });
     main.querySelector('#nt').onchange = (e) => update({ notify: e.target.checked });
     main.querySelector('#pwset').onclick = async () => {
-      const pw = await dialog({ title: 'Passwort für den Link', input: '', type: 'password', placeholder: 'mind. 4 Zeichen', ok: 'Speichern' });
+      const pw = await dialog({ title: L('Password for the link', 'Passwort für den Link'), input: '', type: 'password', placeholder: L('at least 4 characters', 'mind. 4 Zeichen'), ok: L('Save', 'Speichern') });
       if (pw === null) return;
-      if (pw.length < 4) return toast('Mindestens 4 Zeichen');
-      update({ password: pw }, 'Passwort gesetzt');
+      if (pw.length < 4) return toast(L('At least 4 characters', 'Mindestens 4 Zeichen'));
+      update({ password: pw }, L('Password set', 'Passwort gesetzt'));
     };
     const pwdel = main.querySelector('#pwdel');
-    if (pwdel) pwdel.onclick = () => update({ password: '' }, 'Passwort entfernt');
+    if (pwdel) pwdel.onclick = () => update({ password: '' }, L('Password removed', 'Passwort entfernt'));
     main.querySelectorAll('#seg button').forEach((b) => {
       b.onclick = () => {
         const d = +b.dataset.d;
@@ -568,30 +587,33 @@ ${s.has_password ? '<button class="iconbtn text" id="pwdel">Entfernen</button>' 
       };
     });
     main.querySelector('#del').onclick = async () => {
-      if (!(await dialog({ title: 'Freigabe beenden?', text: 'Der Link funktioniert danach nicht mehr.', ok: 'Beenden', danger: true }))) return;
-      try { await api('DELETE', '/shares/' + token); toast('Freigabe beendet'); go('#/shares'); } catch (e) { fail(e); }
+      if (!(await dialog({ title: L('End link?', 'Freigabe beenden?'), text: L('The link stops working.', 'Der Link funktioniert danach nicht mehr.'), ok: L('End', 'Beenden'), danger: true }))) return;
+      try { await api('DELETE', '/shares/' + token); toast(L('Link ended', 'Freigabe beendet')); go('#/shares'); } catch (e) { fail(e); }
     };
   }
 
   // ------------------------------------------------------------ Konto
 
   async function renderAccount() {
-    const main = shell('Konto', { tab: 'account', body: '<div class="spinner"></div>' });
+    const main = shell(L('Account', 'Konto'), { tab: 'account', body: '<div class="spinner"></div>' });
     try { state.me = await api('GET', '/me'); } catch (e) { return fail(e); }
     const me = state.me;
     const frac = me.quota_bytes > 0 ? Math.min(1, me.used_bytes / me.quota_bytes) : 0;
     const standalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone;
     const ios = /iPhone|iPad|iPod/.test(navigator.userAgent);
     main.innerHTML = `
-${!standalone && ios ? `<div class="install">${ic('share', 18)}<span>Als App nutzen: in Safari auf Teilen tippen und „Zum Home-Bildschirm“ wählen.</span></div>` : ''}
-<div class="group quota"><div class="head"><span class="big">${size(me.used_bytes)} belegt</span><span class="meta">von ${size(me.quota_bytes)}</span></div>
+${!standalone && ios ? `<div class="install">${ic('share', 18)}<span>${L('Use as an app: in Safari, tap Share and choose “Add to Home Screen”.', 'Als App nutzen: in Safari auf Teilen tippen und „Zum Home-Bildschirm“ wählen.')}</span></div>` : ''}
+<div class="group quota"><div class="head"><span class="big">${L(`${size(me.used_bytes)} used`, `${size(me.used_bytes)} belegt`)}</span><span class="meta">${L('of', 'von')} ${size(me.quota_bytes)}</span></div>
 <div class="track"><div class="fill" id="qf"></div></div></div>
-<div class="label">Angemeldet</div>
+<div class="label">${L('Signed in', 'Angemeldet')}</div>
 <div class="group"><div class="row"><span class="ic">${ic('user')}</span><span class="txt"><span class="name">${esc(me.username)}${me.is_admin ? ' · Admin' : ''}</span><span class="meta">${esc(location.host)}</span></span></div></div>
 <div class="label"></div>
-<div class="group"><button class="row" id="manage"><span class="ic">${ic(me.is_admin ? 'users' : 'user')}</span><span class="txt"><span class="name">${me.is_admin ? 'Konto & Verwaltung' : 'Konto verwalten'}</span><span class="meta">Passwort, Geräte, Links${me.is_admin ? ', Benutzer, Einstellungen' : ''}</span></span><span class="chev">${ic('chev', 16)}</span></button></div>
+<div class="group"><button class="row" id="manage"><span class="ic">${ic(me.is_admin ? 'users' : 'user')}</span><span class="txt"><span class="name">${me.is_admin ? L('Account & administration', 'Konto & Verwaltung') : L('Manage account', 'Konto verwalten')}</span><span class="meta">${L('Password, devices, links', 'Passwort, Geräte, Links')}${me.is_admin ? L(', users, settings', ', Benutzer, Einstellungen') : ''}</span></span><span class="chev">${ic('chev', 16)}</span></button></div>
+<div class="label">${L('Language', 'Sprache')}</div>
+<div class="group"><div class="field"><div class="seg" id="langseg"><button data-l="en" class="${LANG === 'en' ? 'on' : ''}">English</button><button data-l="de" class="${LANG === 'de' ? 'on' : ''}">Deutsch</button></div></div></div>
 <div class="label"></div>
-<div class="group"><button class="row danger" id="logout">${ic('logout')}Abmelden</button></div>`;
+<div class="group"><button class="row danger" id="logout">${ic('logout')}${L('Sign out', 'Abmelden')}</button></div>`;
+    main.querySelectorAll('#langseg button').forEach((b) => (b.onclick = () => setLang(b.dataset.l)));
     const qf = main.querySelector('#qf');
     qf.style.width = Math.round(frac * 100) + '%';
     if (frac > 0.95) qf.classList.add('full');
@@ -603,7 +625,7 @@ ${!standalone && ios ? `<div class="install">${ic('share', 18)}<span>Als App nut
       } catch (e) { location.href = '/account'; }
     };
     main.querySelector('#logout').onclick = async () => {
-      if (!(await dialog({ title: 'Abmelden?', ok: 'Abmelden', danger: true }))) return;
+      if (!(await dialog({ title: L('Sign out?', 'Abmelden?'), ok: L('Sign out', 'Abmelden'), danger: true }))) return;
       try { await api('POST', '/auth/logout'); } catch {}
       store.token = null;
       state.me = null;

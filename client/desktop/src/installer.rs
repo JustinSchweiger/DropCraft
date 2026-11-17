@@ -222,13 +222,17 @@ mod win {
         }
         match crate::shellmenu::setup(&install_dir()) {
             Ok(()) => {
-                message(
+                // Explorer liest neue App-Erweiterungen erst beim Start ein.
+                let restart = message(
                     t(
-                        "The Explorer menu is set up. Right-click a file in your DropCraft folder › “DropCraft”.",
-                        "Das Explorer-Menü ist eingerichtet. Rechtsklick auf eine Datei in deinem DropCraft-Ordner › „DropCraft“.",
+                        "The Explorer menu is set up.\n\nExplorer shows it only after a restart. Restart Explorer now? Open Explorer windows will close.\n\nThen right-click a file in your DropCraft folder › “DropCraft”.",
+                        "Das Explorer-Menü ist eingerichtet.\n\nDer Explorer zeigt es erst nach einem Neustart. Explorer jetzt neu starten? Offene Explorer-Fenster werden geschlossen.\n\nDanach: Rechtsklick auf eine Datei in deinem DropCraft-Ordner › „DropCraft“.",
                     ),
-                    MB_OK | MB_ICONINFORMATION,
+                    MB_YESNO | MB_ICONQUESTION,
                 );
+                if restart == IDYES {
+                    restart_explorer();
+                }
             }
             Err(e) => {
                 message(
@@ -237,6 +241,13 @@ mod win {
                 );
             }
         }
+    }
+
+    /// Beendet den Explorer und startet ihn neu (Taskleiste und Fenster kommen wieder).
+    fn restart_explorer() {
+        let _ = Command::new("taskkill").args(["/F", "/IM", "explorer.exe"]).creation_flags(CREATE_NO_WINDOW).status();
+        std::thread::sleep(Duration::from_millis(800));
+        let _ = Command::new("explorer.exe").spawn();
     }
 
     fn write_uninstall_entry(exe: &Path) -> std::io::Result<()> {

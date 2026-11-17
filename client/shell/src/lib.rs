@@ -56,6 +56,43 @@ fn app_exe() -> Option<PathBuf> {
     Some(dll.parent()?.join("DropCraft.exe"))
 }
 
+/// Fehlersuche: Ist `%APPDATA%\DropCraft\shell-debug` vorhanden, protokolliert
+/// die DLL jeden Aufruf des Explorers nach `%TEMP%\DropCraftShell.log`.
+fn debug(msg: &str) {
+    let Some(appdata) = std::env::var_os("APPDATA") else { return };
+    if !Path::new(&appdata).join("DropCraft").join("shell-debug").exists() {
+        return;
+    }
+    let log = std::env::temp_dir().join("DropCraftShell.log");
+    if std::fs::metadata(&log).map(|m| m.len() > 512 * 1024).unwrap_or(false) {
+        let _ = std::fs::remove_file(&log);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        let _ = std::io::Write::write_all(&mut f, format!("{t} pid={} {msg}
+", std::process::id()).as_bytes());
+    }
+}
+
+/// Anzahl und erster Pfad der Auswahl, für das Protokoll.
+fn describe(items: &Ref<IShellItemArray>) -> String {
+    let Some(arr) = items.as_ref() else { return "items=NULL".into() };
+    unsafe {
+        let n = arr.GetCount().unwrap_or(0);
+        let first = arr
+            .GetItemAt(0)
+            .ok()
+            .and_then(|i| i.GetDisplayName(SIGDN_FILESYSPATH).ok())
+            .map(|p| {
+                let s = p.to_string().unwrap_or_default();
+                CoTaskMemFree(Some(p.0 as *const c_void));
+                s
+            })
+            .unwrap_or_else(|| "<kein Dateipfad>".into());
+        format!("items={n} first={first}")
+    }
+}
+
 fn config() -> serde_json::Value {
     let Some(appdata) = std::env::var_os("APPDATA") else { return serde_json::Value::Null };
     let Ok(text) = std::fs::read_to_string(Path::new(&appdata).join("DropCraft").join("config.json")) else { return serde_json::Value::Null };
@@ -168,11 +205,13 @@ struct Command {
 }
 
 impl IExplorerCommand_Impl for Command_Impl {
-    fn GetTitle(&self, _items: Ref<IShellItemArray>) -> Result<PWSTR> {
+    fn GetTitle(&self, items: Ref<IShellItemArray>) -> Result<PWSTR> {
+        debug(&format!("GetTitle {:?} {}", self.kind.arg(), describe(&items)));
         dup(self.kind.title())
     }
 
-    fn GetIcon(&self, _items: Ref<IShellItemArray>) -> Result<PWSTR> {
+    fn GetIcon(&self, items: Ref<IShellItemArray>) -> Result<PWSTR> {
+        debug(&format!("GetIcon {:?} {}", self.kind.arg(), describe(&items)));
         match (self.kind, app_exe()) {
             (Kind::Root, Some(exe)) => dup(&format!("{},0", exe.display())),
             _ => Err(E_NOTIMPL.into()),
@@ -187,13 +226,15 @@ impl IExplorerCommand_Impl for Command_Impl {
         Ok(self.kind.guid())
     }
 
-    fn GetState(&self, items: Ref<IShellItemArray>, _ok_to_be_slow: BOOL) -> Result<u32> {
+    fn GetState(&self, items: Ref<IShellItemArray>, ok_to_be_slow: BOOL) -> Result<u32> {
+        let info = describe(&items);
         let visible = match single_path(items).as_deref().and_then(place) {
             None => false,
             // Den Sync-Ordner selbst kann man nicht freigeben, nur im Browser zeigen.
             Some(Place::Root) => matches!(self.kind, Kind::Root | Kind::OpenWeb),
             Some(Place::Inside) => true,
         };
+        debug(&format!("GetState {:?} slow={} {info} -> {}", self.kind.arg(), ok_to_be_slow.as_bool(), if visible { "visible" } else { "hidden" }));
         Ok(if visible { ECS_ENABLED.0 as u32 } else { ECS_HIDDEN.0 as u32 })
     }
 
@@ -208,10 +249,12 @@ impl IExplorerCommand_Impl for Command_Impl {
     }
 
     fn GetFlags(&self) -> Result<u32> {
+        debug(&format!("GetFlags {:?}", self.kind.arg()));
         Ok(if self.kind == Kind::Root { ECF_HASSUBCOMMANDS.0 as u32 } else { ECF_DEFAULT.0 as u32 })
     }
 
     fn EnumSubCommands(&self) -> Result<IEnumExplorerCommand> {
+        debug(&format!("EnumSubCommands {:?}", self.kind.arg()));
         if self.kind == Kind::Root {
             Ok(SubCommands { pos: AtomicUsize::new(0) }.into())
         } else {
@@ -273,6 +316,7 @@ impl IClassFactory_Impl for Factory_Impl {
         if !outer.is_null() {
             return Err(CLASS_E_NOAGGREGATION.into());
         }
+        debug("CreateInstance");
         let cmd: IExplorerCommand = Command { kind: Kind::Root }.into();
         unsafe { cmd.query(riid, ppv).ok() }
     }
