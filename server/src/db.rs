@@ -65,6 +65,7 @@ pub async fn connect(data_dir: &Path) -> anyhow::Result<SqlitePool> {
     add_column(&pool, "shares", "password_hash", "TEXT").await?;
     add_column(&pool, "shares", "expires_at", "INTEGER").await?;
     add_column(&pool, "shares", "notify", "INTEGER NOT NULL DEFAULT 1").await?;
+    add_column(&pool, "users", "disabled", "INTEGER NOT NULL DEFAULT 0").await?;
     sqlx::raw_sql("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         .execute(&pool)
         .await?;

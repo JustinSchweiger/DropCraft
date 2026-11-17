@@ -7,6 +7,7 @@ use dropcraft_core::{Api, ApiError};
 
 use crate::{
     app::{copy_to_clipboard, open_url, remote_path},
+    i18n::t,
     config::{Account, Config},
     notify,
 };
@@ -36,16 +37,16 @@ fn name(path: &Path) -> String {
 /// Zwischenablage legen und mit einer Windows-Meldung bestätigen.
 pub fn copy_link(path: &Path) {
     let Some((acc, rp)) = locate(path).filter(|(_, rp)| !rp.is_empty()) else {
-        notify::show("DropCraft", &format!("„{}“ liegt in keinem DropCraft-Ordner.", name(path)));
+        notify::show("DropCraft", &tf!("“{}” is not in a DropCraft folder.", "„{}“ liegt in keinem DropCraft-Ordner.", name(path)));
         return;
     };
     let res = Api::new(&acc.server, acc.token.clone()).and_then(|api| api.create_share(&rp).map(|s| api.share_url(&s.token)));
     match res {
-        Ok(url) if copy_to_clipboard(&url) => notify::show("Link kopiert", &format!("„{}“ · {url}", name(path))),
-        Ok(url) => notify::show("Link erstellt", &format!("Zwischenablage nicht verfügbar: {url}")),
-        Err(ApiError::NotFound) => notify::show("DropCraft", &format!("„{}“ ist noch nicht hochgeladen – gleich noch einmal versuchen.", name(path))),
-        Err(ApiError::Unauthorized) => notify::show("DropCraft", "Bitte in DropCraft neu anmelden."),
-        Err(e) => notify::show("Link konnte nicht erstellt werden", &e.to_string()),
+        Ok(url) if copy_to_clipboard(&url) => notify::show(t("Link copied", "Link kopiert"), &tf!("“{}” · {url}", "„{}“ · {url}", name(path))),
+        Ok(url) => notify::show(t("Link created", "Link erstellt"), &tf!("Clipboard not available: {url}", "Zwischenablage nicht verfügbar: {url}")),
+        Err(ApiError::NotFound) => notify::show("DropCraft", &tf!("“{}” is not uploaded yet – try again in a moment.", "„{}“ ist noch nicht hochgeladen – gleich noch einmal versuchen.", name(path))),
+        Err(ApiError::Unauthorized) => notify::show("DropCraft", t("Please sign in to DropCraft again.", "Bitte in DropCraft neu anmelden.")),
+        Err(e) => notify::show(t("Could not create the link", "Link konnte nicht erstellt werden"), &e.to_string()),
     }
 }
 
@@ -53,7 +54,7 @@ pub fn copy_link(path: &Path) {
 /// Ordner, in dem sie liegt).
 pub fn open_web(path: &Path) {
     let Some((acc, rp)) = locate(path) else {
-        notify::show("DropCraft", &format!("„{}“ liegt in keinem DropCraft-Ordner.", name(path)));
+        notify::show("DropCraft", &tf!("“{}” is not in a DropCraft folder.", "„{}“ liegt in keinem DropCraft-Ordner.", name(path)));
         return;
     };
     let dir = if path.is_dir() { rp } else { rp.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default() };

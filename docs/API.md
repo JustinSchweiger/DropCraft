@@ -17,8 +17,11 @@ All endpoints are under `/api`. Authenticate with `Authorization: Bearer <token>
 | GET | `/sync/changes?cursor=<n>&limit=1000` | All changes since `cursor`. `cursor=0` returns the full state |
 | GET/POST | `/shares` | List links / create one `{path}` → `{token}`; public at `/s/{token}`. Creating returns the existing link for a path if there is one |
 | DELETE | `/shares/{token}` | End a link |
-| GET/POST | `/admin/users` | List / create accounts `{username, password, quota_gb}` |
+| POST | `/account/web-login` | `{page: "" or "admin"}` → `{url}`: one-time link that opens the account website signed in (2 minutes) |
+| GET/POST | `/admin/users` | List / create accounts `{username, password, quota_gb}` (kept for older apps; use the account website) |
 | PATCH/DELETE | `/admin/users/{id}` | Change quota or password / delete the account |
+
+Disabled accounts get `403` on login and `401` on everything else.
 
 ## How a client syncs
 

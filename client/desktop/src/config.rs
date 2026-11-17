@@ -51,11 +51,18 @@ pub struct Config {
     /// Updates automatisch installieren (sonst nur melden).
     #[serde(default = "yes")]
     pub auto_update: bool,
+    /// Sprache der App: "en" (Standard) oder "de".
+    #[serde(default = "english")]
+    pub language: String,
+}
+
+fn english() -> String {
+    "en".into()
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { accounts: Vec::new(), autostart: true, up_limit_mbps: 0.0, down_limit_mbps: 0.0, notifications: true, auto_update: true }
+        Self { accounts: Vec::new(), autostart: true, up_limit_mbps: 0.0, down_limit_mbps: 0.0, notifications: true, auto_update: true, language: english() }
     }
 }
 
@@ -235,7 +242,7 @@ pub fn register_context_menu(accounts: &[Account]) {
             continue;
         }
         let Ok((key, _)) = hkcu.create_subkey(base) else { continue };
-        let _ = key.set_value("MUIVerb", &"DropCraft-Link kopieren");
+        let _ = key.set_value("MUIVerb", &crate::i18n::t("Copy DropCraft link", "DropCraft-Link kopieren"));
         let _ = key.set_value("Icon", &format!("\"{}\",0", exe.display()));
         // Kein „AppliesTo“-Filter: der war unzuverlässig. Liegt die Datei
         // außerhalb der Sync-Ordner, meldet die App das freundlich.

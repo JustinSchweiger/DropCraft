@@ -118,13 +118,13 @@ impl CloudHooks {
         self.broken.store(true, std::sync::atomic::Ordering::SeqCst);
         let ours = root_id(&self.account_id).map(|i| i.to_os_string().to_string_lossy().into_owned()).unwrap_or_default();
         let state = match cloud_filter::root::SyncRootId::from_path(&self.root) {
-            Ok(id) if id.to_os_string().to_string_lossy() == ours => "ist angemeldet, Windows lehnt die Datei trotzdem ab".to_string(),
-            Ok(id) => format!("gehört zu „{}“", id.to_os_string().to_string_lossy()),
-            Err(err) => format!("ist bei Windows nicht als Cloud-Ordner angemeldet ({err})"),
+            Ok(id) if id.to_os_string().to_string_lossy() == ours => crate::i18n::t("is registered, but Windows still rejects the file", "ist angemeldet, Windows lehnt die Datei trotzdem ab").to_string(),
+            Ok(id) => tf!("belongs to “{}”", "gehört zu „{}“", id.to_os_string().to_string_lossy()),
+            Err(err) => tf!("is not registered with Windows as a cloud folder ({err})", "ist bei Windows nicht als Cloud-Ordner angemeldet ({err})"),
         };
         std::io::Error::new(
             e.kind(),
-            format!("{} – „{}“ {state}. DropCraft meldet ihn neu an.", e, self.root.display()),
+            tf!("{} – “{}” {state}. DropCraft registers it again.", "{} – „{}“ {state}. DropCraft meldet ihn neu an.", e, self.root.display()),
         )
     }
 }
@@ -358,7 +358,7 @@ pub fn connect(
     wake: Sender<Cmd>,
 ) -> Result<(CloudHooks, CloudRoot), String> {
     if !cloud_filter::root::is_supported().unwrap_or(false) {
-        return Err("Windows unterstützt hier keine Cloud-Dateien".into());
+        return Err(crate::i18n::t("Windows does not support cloud files here", "Windows unterstützt hier keine Cloud-Dateien").into());
     }
     let id = root_id(account_id)?;
     // Alte DropCraft-Registrierungen für denselben Ordner entfernen (z. B.
@@ -390,11 +390,11 @@ pub fn connect(
             .with_path(root)
             .map_err(|e| e.to_string())?;
         id.register(info).map_err(|e| {
-            format!("Registrierung fehlgeschlagen: {e}. Liegt der Ordner in OneDrive oder einem anderen Cloud-Ordner? Dann einen anderen Speicherort wählen.")
+            tf!("Registration failed: {e}. Is the folder inside OneDrive or another cloud folder? Then choose another location.", "Registrierung fehlgeschlagen: {e}. Liegt der Ordner in OneDrive oder einem anderen Cloud-Ordner? Dann einen anderen Speicherort wählen.")
         })?;
     }
     let provider = Provider { root: root.to_path_buf(), api, progress, wake };
-    let conn = Session::new().connect(root, provider).map_err(|e| format!("Verbindung fehlgeschlagen: {e}"))?;
+    let conn = Session::new().connect(root, provider).map_err(|e| tf!("Connection failed: {e}", "Verbindung fehlgeschlagen: {e}"))?;
     let hooks = CloudHooks {
         root: root.to_path_buf(),
         marked: Mutex::new(HashSet::new()),
@@ -405,12 +405,13 @@ pub fn connect(
     match cloud_filter::root::SyncRootId::from_path(root) {
         Ok(found) if found.to_os_string() == id.to_os_string() => {}
         Ok(found) => {
-            return Err(format!(
+            return Err(tf!(
+                "Windows has the folder registered for “{}”, not for DropCraft. Please choose another folder.",
                 "Der Ordner ist bei Windows für „{}“ angemeldet, nicht für DropCraft. Bitte einen anderen Ordner wählen.",
                 found.to_os_string().to_string_lossy()
             ))
         }
-        Err(e) => return Err(format!("Windows hat den Ordner nicht als Cloud-Ordner übernommen: {e}")),
+        Err(e) => return Err(tf!("Windows did not accept the folder as a cloud folder: {e}", "Windows hat den Ordner nicht als Cloud-Ordner übernommen: {e}")),
     }
     // Der Sync-Ordner selbst bekommt ebenfalls den grünen Haken.
     if let Ok(mut ph) = open_handle(root, false) {

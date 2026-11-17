@@ -22,7 +22,7 @@ and an Explorer menu, share links with a web gallery, a web app and a native iPh
 </div>
 
 > [!NOTE]
-> DropCraft is an independent project and not affiliated with Dropbox, Inc. The apps are in German.
+> DropCraft is an independent project and not affiliated with Dropbox, Inc.
 
 ## Features
 
@@ -36,7 +36,8 @@ and an Explorer menu, share links with a web gallery, a web app and a native iPh
 | 🖥️ **Tray app** | A popup above the taskbar (menu bar on macOS) with live progress, speed and time left; starts silently with Windows |
 | 📱 **iPhone & iPad** | Native SwiftUI app: browse, preview, upload from Photos and Files, manage links and users |
 | 🌐 **Web app** | Installable web app under `/app/` for any browser |
-| 🛡️ **Admin** | Create users with a quota in GB, reset passwords, change storage, all from the app |
+| 🛡️ **Account website** | `/account` on your server: storage, password, signed-in devices and share links for everyone; users, quotas, disabling accounts and server settings for admins. One click from the apps, already signed in |
+| 🌍 **English & Deutsch** | The Windows and macOS app, the Explorer menu and the account website in English (default) or German |
 | 🔄 **Install & updates** | `DropCraft.exe` installs itself without admin rights and keeps itself up to date |
 | 🐳 **Server** | axum + SQLite, files stored as blobs per account, Docker with Caddy for automatic HTTPS, deployed by GitHub Actions |
 | 🎵 **Musik-Check** | Bonus page that checks spliced music files for loudness (EBU R128), clipping and cuts, entirely in the browser |
@@ -102,8 +103,9 @@ cd /opt/dropcraft/deploy && ./setup.sh cloud.example.com   # without a domain: .
 docker compose exec -it dropcraft dropcraft-server adduser justin 100 --admin
 ```
 
-Caddy gets the HTTPS certificate automatically. See [SERVER.md](docs/SERVER.md) for settings,
-automatic deployment, backups and n8n.
+Caddy gets the HTTPS certificate automatically. Everything else (users, quotas, links, server
+settings) is managed at `https://<your-domain>/account`. See [SERVER.md](docs/SERVER.md) for
+deployment, backups and n8n.
 </details>
 
 ## Documentation
@@ -111,7 +113,7 @@ automatic deployment, backups and n8n.
 | Guide | Topic |
 |---|---|
 | [WINDOWS.md](docs/WINDOWS.md) | The Windows app: tray popup, files on demand, Explorer menu, installer, command line |
-| [SERVER.md](docs/SERVER.md) | Running the server: VPS setup, settings, deployment, backups, n8n |
+| [SERVER.md](docs/SERVER.md) | Running the server: VPS setup, account website, settings, deployment, backups, n8n |
 | [API.md](docs/API.md) | HTTP API and how a client syncs |
 | [IOS.md](docs/IOS.md) | Installing the iPhone and iPad app |
 
@@ -150,7 +152,7 @@ cargo build --release -p dropcraft-desktop --features cloud-files
 <summary><b>Project layout</b></summary>
 
 ```
-server/          Rust backend (axum + SQLite): accounts, blobs, shares, web app, updates
+server/          Rust backend (axum + SQLite): accounts, blobs, shares, account website, web app, updates
 client/core/     sync engine and API client
 client/desktop/  Windows and macOS app (egui): tray, sync folders, installer, updater
 client/shell/    Windows 11 Explorer menu (IExplorerCommand DLL, embedded in DropCraft.exe)

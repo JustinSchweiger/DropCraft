@@ -163,7 +163,7 @@ fn two_devices_stay_in_sync() {
     assert_eq!(na, nb, "beide Geräte sollen dieselben Dateien haben");
     assert_eq!(na.len(), 2, "{na:?}");
     assert_eq!(read(&ra, "Dokumente/Brief final.txt").unwrap(), b"Version PC");
-    let copy = na.iter().find(|n| n.contains("Konflikt Handy")).expect("Konflikt-Kopie fehlt");
+    let copy = na.iter().find(|n| n.contains("Conflict Handy")).expect("Konflikt-Kopie fehlt");
     assert_eq!(read(&ra, &format!("Dokumente/{copy}")).unwrap(), b"Version Handy");
 
     // 6. Ordner mit Inhalt löschen.
@@ -190,7 +190,7 @@ fn two_devices_stay_in_sync() {
     let t = SystemTime::now() - Duration::from_secs(5);
     filetime::set_file_mtime(ra.join("riesig.bin"), filetime::FileTime::from_system_time(t)).unwrap();
     let r = a.engine.sync_once().unwrap();
-    assert!(r.events.iter().any(|e| e.kind == EventKind::Error && e.detail.contains("Speicherplatz")), "{r:?}");
+    assert!(r.events.iter().any(|e| e.kind == EventKind::Error && e.detail.contains("Storage full")), "{r:?}");
     fs::remove_file(ra.join("riesig.bin")).unwrap();
 
     // 9. Fehlender Sync-Ordner darf nichts auf dem Server löschen.

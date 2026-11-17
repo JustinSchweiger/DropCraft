@@ -50,14 +50,14 @@ pub fn shared_folder_changes(api: &Api, own_device: &str, events: &[Event]) {
 pub fn summary(added: usize, removed: usize, who: &[String]) -> String {
     let mut parts = Vec::new();
     if added > 0 {
-        parts.push(if added == 1 { "1 neue Datei".to_string() } else { format!("{added} neue Dateien") });
+        parts.push(if added == 1 { crate::i18n::t("1 new file", "1 neue Datei").to_string() } else { tf!("{added} new files", "{added} neue Dateien") });
     }
     if removed > 0 {
-        parts.push(if removed == 1 { "1 Datei gelöscht".to_string() } else { format!("{removed} Dateien gelöscht") });
+        parts.push(if removed == 1 { crate::i18n::t("1 file deleted", "1 Datei gelöscht").to_string() } else { tf!("{removed} files deleted", "{removed} Dateien gelöscht") });
     }
     let mut s = parts.join(", ");
     if !who.is_empty() {
-        s.push_str(&format!(" · von {}", who.join(", ")));
+        s.push_str(&tf!(" · by {}", " · von {}", who.join(", ")));
     }
     s
 }
@@ -87,7 +87,7 @@ pub fn init() {
         std::thread::spawn(|| {
             register_app_id();
             if let Err(e) = ensure_shortcut() {
-                *LAST_ERROR.lock().unwrap() = Some(format!("Startmenü-Verknüpfung: {e}"));
+                *LAST_ERROR.lock().unwrap() = Some(tf!("Start menu shortcut: {e}", "Startmenü-Verknüpfung: {e}"));
             }
         });
     }
@@ -188,6 +188,7 @@ pub fn show(title: &str, body: &str) {
 mod tests {
     #[test]
     fn texts() {
+        crate::i18n::apply("de");
         assert_eq!(super::summary(3, 0, &["Gast: Anna".into()]), "3 neue Dateien · von Gast: Anna");
         assert_eq!(super::summary(1, 2, &[]), "1 neue Datei, 2 Dateien gelöscht");
     }

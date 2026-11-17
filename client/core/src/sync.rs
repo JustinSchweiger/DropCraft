@@ -36,13 +36,13 @@ use crate::{
 pub enum SyncError {
     #[error(transparent)]
     Api(#[from] ApiError),
-    #[error("Datenbankfehler: {0}")]
+    #[error("{}: {0}", crate::lang::t("Database error", "Datenbankfehler"))]
     Db(#[from] rusqlite::Error),
-    #[error("Dateifehler: {0}")]
+    #[error("{}: {0}", crate::lang::t("File error", "Dateifehler"))]
     Io(#[from] std::io::Error),
-    #[error("Sync-Ordner nicht gefunden: {0}")]
+    #[error("{}: {0}", crate::lang::t("Sync folder not found", "Sync-Ordner nicht gefunden"))]
     RootMissing(String),
-    #[error("Pausiert")]
+    #[error("{}", crate::lang::t("Paused", "Pausiert"))]
     Paused,
 }
 
@@ -143,7 +143,7 @@ fn transfer_cb(prog: &ProgressRef, bw: &BandwidthRef, pause: &PauseFlag, id: u64
     let (prog, bw, pause) = (prog.clone(), bw.clone(), pause.clone());
     move |n| {
         if pause.load(Ordering::SeqCst) {
-            return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "Pausiert"));
+            return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, crate::lang::t("Paused", "Pausiert")));
         }
         if upload {
             bw.up.take(n);
@@ -157,7 +157,7 @@ fn transfer_cb(prog: &ProgressRef, bw: &BandwidthRef, pause: &PauseFlag, id: u64
 
 /// Lädt eine Datei vom Server (Teil, der parallel laufen darf).
 fn fetch_file(api: &Api, prog: &ProgressRef, bw: &BandwidthRef, pause: &PauseFlag, e: &RemoteEntry, local: &Path) -> Result<(), SyncError> {
-    let parent = local.parent().ok_or_else(|| std::io::Error::other("Ungültiger Pfad"))?.to_path_buf();
+    let parent = local.parent().ok_or_else(|| std::io::Error::other(crate::lang::t("Invalid path", "Ungültiger Pfad")))?.to_path_buf();
     fs::create_dir_all(&parent)?;
     let tmp = parent.join(format!(".dropcraft-{}.tmp", uuid::Uuid::new_v4()));
     let id = progress::start(prog, &e.path, false, e.size as u64);
@@ -167,7 +167,7 @@ fn fetch_file(api: &Api, prog: &ProgressRef, bw: &BandwidthRef, pause: &PauseFla
         if let Some(expected) = &e.sha256 {
             let got = hash_file(&tmp)?;
             if &got != expected {
-                return Err(SyncError::Io(std::io::Error::other("Prüfsumme stimmt nicht")));
+                return Err(SyncError::Io(std::io::Error::other(crate::lang::t("Checksum mismatch", "Prüfsumme stimmt nicht"))));
             }
         }
         let ft = filetime::FileTime::from_unix_time(e.modified_at / 1000, ((e.modified_at % 1000) * 1_000_000) as u32);
@@ -405,7 +405,7 @@ impl SyncEngine {
         match fs::symlink_metadata(&local) {
             Ok(m) if m.is_dir() => {
                 return Err(SyncError::Io(std::io::Error::other(
-                    "Lokal existiert ein Ordner mit diesem Namen",
+                    crate::lang::t("A local folder has this name", "Lokal existiert ein Ordner mit diesem Namen"),
                 )));
             }
             Ok(m) => {
@@ -598,7 +598,7 @@ impl SyncEngine {
                 Err(SyncError::Paused) => return Err(SyncError::Paused),
                 Err(SyncError::Api(e @ (ApiError::Network(_) | ApiError::Unauthorized))) => return Err(e.into()),
                 Err(SyncError::Api(ApiError::QuotaExceeded)) => {
-                    self.event(EventKind::Error, path, "Speicherplatz voll".into());
+                    self.event(EventKind::Error, path, crate::lang::t("Storage full", "Speicherplatz voll").into());
                 }
                 Err(e) => self.event(EventKind::Error, path, e.to_string()),
             }
@@ -654,7 +654,7 @@ impl SyncEngine {
                         true
                     }
                     Err(SyncError::Api(ApiError::QuotaExceeded)) => {
-                        self.event(EventKind::Error, &j.path, "Speicherplatz voll".into());
+                        self.event(EventKind::Error, &j.path, crate::lang::t("Storage full", "Speicherplatz voll").into());
                         false
                     }
                     Err(e) => {
@@ -701,7 +701,7 @@ impl SyncEngine {
                     if let Err(err) = self.hooks.free_space(&local) {
                         // Datei gerade geöffnet (z. B. Video läuft): später erneut versuchen.
                         if err.raw_os_error() != Some(32) {
-                            self.event(EventKind::Error, &s.path, format!("Speicher freigeben: {err}"));
+                            self.event(EventKind::Error, &s.path, format!("{}: {err}", crate::lang::t("Free up space", "Speicher freigeben")));
                         }
                     } else if let Ok(m) = fs::metadata(&local) {
                         self.state.put(&Synced { local_mtime: mtime_ms(&m), ..s.clone() })?;
@@ -757,7 +757,7 @@ impl SyncEngine {
                         fatal = Some(SyncError::Paused);
                         return true;
                     }
-                    self.event(EventKind::Error, &s.path, format!("Herunterladen: {err}"));
+                    self.event(EventKind::Error, &s.path, format!("{}: {err}", crate::lang::t("Download", "Herunterladen")));
                     false
                 }
             },
@@ -816,18 +816,19 @@ impl SyncEngine {
     fn move_to_conflict(&mut self, path: &str) -> Result<(), SyncError> {
         let local = self.local_path(path);
         let stamp = chrono::Local::now().format("%Y-%m-%d %H-%M");
-        let (stem, ext) = split_ext(local.file_name().and_then(|n| n.to_str()).unwrap_or("Datei"));
+        let (stem, ext) = split_ext(local.file_name().and_then(|n| n.to_str()).unwrap_or(crate::lang::t("File", "Datei")));
         let parent = local.parent().unwrap_or(&self.root).to_path_buf();
-        let mut target = parent.join(format!("{stem} (Konflikt {} {stamp}){ext}", self.device));
+        let word = crate::lang::t("Conflict", "Konflikt");
+        let mut target = parent.join(format!("{stem} ({word} {} {stamp}){ext}", self.device));
         let mut n = 2;
         while target.exists() {
-            target = parent.join(format!("{stem} (Konflikt {} {stamp} {n}){ext}", self.device));
+            target = parent.join(format!("{stem} ({word} {} {stamp} {n}){ext}", self.device));
             n += 1;
         }
         fs::rename(&local, &target)?;
         self.report.conflicts += 1;
         let name = target.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
-        self.event(EventKind::Conflict, path, format!("Deine Version liegt jetzt unter „{name}“"));
+        self.event(EventKind::Conflict, path, if crate::lang::german() { format!("Deine Version liegt jetzt unter „{name}“") } else { format!("Your version is now “{name}”") });
         Ok(())
     }
 
@@ -913,9 +914,18 @@ pub fn human_size(b: i64) -> String {
     } else if b < 1024.0 * 1024.0 {
         format!("{:.0} KB", b / 1024.0)
     } else if b < 1024.0 * 1024.0 * 1024.0 {
-        format!("{:.1} MB", b / 1024.0 / 1024.0).replace('.', ",")
+        decimal(format!("{:.1} MB", b / 1024.0 / 1024.0))
     } else {
-        format!("{:.1} GB", b / 1024.0 / 1024.0 / 1024.0).replace('.', ",")
+        decimal(format!("{:.1} GB", b / 1024.0 / 1024.0 / 1024.0))
+    }
+}
+
+/// Dezimalkomma auf Deutsch, Punkt auf Englisch.
+fn decimal(s: String) -> String {
+    if crate::lang::german() {
+        s.replace('.', ",")
+    } else {
+        s
     }
 }
 

@@ -31,7 +31,7 @@ pub fn verify_password(pw: &str, hash: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn hash_token(token: &str) -> String {
+pub(crate) fn hash_token(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
@@ -49,10 +49,68 @@ pub fn validate_username(name: &str) -> ApiResult<()> {
     }
 }
 
-pub fn validate_password(pw: &str) -> ApiResult<()> {
-    if pw.len() < 10 {
-        return Err(ApiError::BadRequest("Passwort muss mindestens 10 Zeichen haben".into()));
+pub fn validate_password(pw: &str, min: u32) -> ApiResult<()> {
+    if pw.chars().count() < min as usize {
+        return Err(ApiError::BadRequest(format!("Password needs at least {min} characters / Passwort braucht mindestens {min} Zeichen")));
     }
+    Ok(())
+}
+
+/// Prüft Benutzername und Passwort (gleich lange Antwortzeit auch für
+/// unbekannte Namen). Gesperrte Konten: `Forbidden`.
+pub async fn check_login(state: &AppState, username: &str, password: &str) -> ApiResult<i64> {
+    let row: Option<(i64, String, bool)> = sqlx::query_as("SELECT id, password_hash, disabled FROM users WHERE username = ?")
+        .bind(username)
+        .fetch_optional(&state.db)
+        .await?;
+    let Some((id, hash, disabled)) = row else {
+        let pw = password.to_string();
+        let dummy = state.dummy_hash.clone();
+        let _ = tokio::task::spawn_blocking(move || verify_password(&pw, &dummy)).await;
+        return Err(ApiError::Unauthorized);
+    };
+    let pw = password.to_string();
+    let ok = tokio::task::spawn_blocking(move || verify_password(&pw, &hash))
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))?;
+    if !ok {
+        return Err(ApiError::Unauthorized);
+    }
+    if disabled {
+        return Err(ApiError::Forbidden);
+    }
+    Ok(id)
+}
+
+/// Neue Sitzung (App, Browser oder Konto-Website); gibt das Token zurück.
+pub async fn create_session(state: &AppState, user_id: i64, device_name: &str) -> ApiResult<String> {
+    let mut raw = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut raw);
+    let token = hex::encode(raw);
+    let now = now_ms();
+    sqlx::query("INSERT INTO sessions (token_hash, user_id, device_name, created_at, last_used) VALUES (?, ?, ?, ?, ?)")
+        .bind(hash_token(&token))
+        .bind(user_id)
+        .bind(device_name)
+        .bind(now)
+        .bind(now)
+        .execute(&state.db)
+        .await?;
+    Ok(token)
+}
+
+/// Setzt ein neues Passwort und meldet alle Sitzungen ab (außer `keep`).
+pub async fn set_password(state: &AppState, user_id: i64, password: &str, keep: Option<&str>) -> ApiResult<()> {
+    sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
+        .bind(hash_password(password)?)
+        .bind(user_id)
+        .execute(&state.db)
+        .await?;
+    sqlx::query("DELETE FROM sessions WHERE user_id = ? AND token_hash != ?")
+        .bind(user_id)
+        .bind(keep.unwrap_or(""))
+        .execute(&state.db)
+        .await?;
     Ok(())
 }
 
@@ -78,7 +136,7 @@ impl FromRequestParts<AppState> for AuthUser {
         let token = header.strip_prefix("Bearer ").ok_or(ApiError::Unauthorized)?;
         let token_hash = hash_token(token.trim());
         let row: Option<(i64, i64, i64, String)> = sqlx::query_as(
-            "SELECT u.id, u.is_admin, s.last_used, s.device_name FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?",
+            "SELECT u.id, u.is_admin, s.last_used, s.device_name FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND u.disabled = 0",
         )
         .bind(&token_hash)
         .fetch_optional(&state.db)
@@ -105,7 +163,7 @@ pub async fn create_user(
     is_admin: bool,
 ) -> ApiResult<i64> {
     validate_username(username)?;
-    validate_password(password)?;
+    validate_password(password, crate::settings::load(state).await.min_password_len)?;
     let hash = hash_password(password)?;
     let res = sqlx::query(
         "INSERT INTO users (username, password_hash, is_admin, quota_bytes, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -140,10 +198,11 @@ pub struct RegisterReq {
 /// Den ersten Admin legt man auf dem Server per `dropcraft-server adduser`
 /// an, damit niemand aus dem Internet ihn sich schnappen kann.
 pub async fn register(State(state): State<AppState>, Json(req): Json<RegisterReq>) -> ApiResult<Json<serde_json::Value>> {
-    if !state.cfg.open_registration {
+    let cfg = crate::settings::load(&state).await;
+    if !cfg.open_registration {
         return Err(ApiError::Forbidden);
     }
-    let id = create_user(&state, &req.username, &req.password, state.cfg.default_quota_bytes, false).await?;
+    let id = create_user(&state, &req.username, &req.password, cfg.default_quota_bytes(), false).await?;
     Ok(Json(serde_json::json!({ "id": id, "is_admin": false })))
 }
 
@@ -161,40 +220,8 @@ pub struct LoginResp {
 }
 
 pub async fn login(State(state): State<AppState>, Json(req): Json<LoginReq>) -> ApiResult<Json<LoginResp>> {
-    let row: Option<(i64, String)> =
-        sqlx::query_as("SELECT id, password_hash FROM users WHERE username = ?")
-            .bind(&req.username)
-            .fetch_optional(&state.db)
-            .await?;
-    // Auch bei unbekanntem Nutzer hashen, damit die Antwortzeit nichts verrät.
-    let (id, hash) = match row {
-        Some(r) => r,
-        None => {
-            let pw = req.password.clone();
-            let dummy = state.dummy_hash.clone();
-            let _ = tokio::task::spawn_blocking(move || verify_password(&pw, &dummy)).await;
-            return Err(ApiError::Unauthorized);
-        }
-    };
-    let pw = req.password.clone();
-    let ok = tokio::task::spawn_blocking(move || verify_password(&pw, &hash))
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
-    if !ok {
-        return Err(ApiError::Unauthorized);
-    }
-    let mut raw = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut raw);
-    let token = hex::encode(raw);
-    let now = now_ms();
-    sqlx::query("INSERT INTO sessions (token_hash, user_id, device_name, created_at, last_used) VALUES (?, ?, ?, ?, ?)")
-        .bind(hash_token(&token))
-        .bind(id)
-        .bind(req.device_name.unwrap_or_else(|| "unbekannt".into()))
-        .bind(now)
-        .bind(now)
-        .execute(&state.db)
-        .await?;
+    let id = check_login(&state, &req.username, &req.password).await?;
+    let token = create_session(&state, id, req.device_name.as_deref().unwrap_or("unbekannt")).await?;
     Ok(Json(LoginResp { token }))
 }
 
@@ -237,7 +264,7 @@ pub async fn change_password(
     user: AuthUser,
     Json(req): Json<ChangePasswordReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    validate_password(&req.new_password)?;
+    validate_password(&req.new_password, crate::settings::load(&state).await.min_password_len)?;
     let (hash,): (String,) = sqlx::query_as("SELECT password_hash FROM users WHERE id = ?")
         .bind(user.id)
         .fetch_one(&state.db)
@@ -245,16 +272,7 @@ pub async fn change_password(
     if !verify_password(&req.old_password, &hash) {
         return Err(ApiError::Unauthorized);
     }
-    sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
-        .bind(hash_password(&req.new_password)?)
-        .bind(user.id)
-        .execute(&state.db)
-        .await?;
     // Alle anderen Geräte abmelden.
-    sqlx::query("DELETE FROM sessions WHERE user_id = ? AND token_hash != ?")
-        .bind(user.id)
-        .bind(&user.token_hash)
-        .execute(&state.db)
-        .await?;
+    set_password(&state, user.id, &req.new_password, Some(&user.token_hash)).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }

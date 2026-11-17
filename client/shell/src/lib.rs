@@ -56,11 +56,20 @@ fn app_exe() -> Option<PathBuf> {
     Some(dll.parent()?.join("DropCraft.exe"))
 }
 
+fn config() -> serde_json::Value {
+    let Some(appdata) = std::env::var_os("APPDATA") else { return serde_json::Value::Null };
+    let Ok(text) = std::fs::read_to_string(Path::new(&appdata).join("DropCraft").join("config.json")) else { return serde_json::Value::Null };
+    serde_json::from_str(&text).unwrap_or(serde_json::Value::Null)
+}
+
+/// Deutsch, wenn in der App so eingestellt (sonst Englisch).
+fn german() -> bool {
+    config()["language"].as_str() == Some("de")
+}
+
 /// Sync-Ordner aller Konten aus `%APPDATA%\DropCraft\config.json`.
 fn sync_dirs() -> Vec<String> {
-    let Some(appdata) = std::env::var_os("APPDATA") else { return Vec::new() };
-    let Ok(text) = std::fs::read_to_string(Path::new(&appdata).join("DropCraft").join("config.json")) else { return Vec::new() };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return Vec::new() };
+    let v = config();
     v["accounts"]
         .as_array()
         .map(|a| a.iter().filter_map(|acc| acc["sync_dir"].as_str().map(norm)).collect())
@@ -122,11 +131,15 @@ const SUBCOMMANDS: [Kind; 3] = [Kind::CopyLink, Kind::ShareOptions, Kind::OpenWe
 
 impl Kind {
     fn title(self) -> &'static str {
+        let de = german();
         match self {
             Kind::Root => "DropCraft",
-            Kind::CopyLink => "DropCraft-Link kopieren",
-            Kind::ShareOptions => "Freigeben …",
-            Kind::OpenWeb => "Im Browser anzeigen",
+            Kind::CopyLink if de => "DropCraft-Link kopieren",
+            Kind::CopyLink => "Copy DropCraft link",
+            Kind::ShareOptions if de => "Freigeben …",
+            Kind::ShareOptions => "Share …",
+            Kind::OpenWeb if de => "Im Browser anzeigen",
+            Kind::OpenWeb => "View in browser",
         }
     }
 

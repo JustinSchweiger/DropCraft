@@ -7,19 +7,19 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
-    #[error("Nicht angemeldet oder Sitzung abgelaufen")]
+    #[error("{}", crate::lang::t("Not signed in or session expired", "Nicht angemeldet oder Sitzung abgelaufen"))]
     Unauthorized,
-    #[error("Konflikt: {0}")]
+    #[error("{}: {0}", crate::lang::t("Conflict", "Konflikt"))]
     Conflict(String),
-    #[error("Nicht gefunden")]
+    #[error("{}", crate::lang::t("Not found", "Nicht gefunden"))]
     NotFound,
-    #[error("Speicherplatz voll")]
+    #[error("{}", crate::lang::t("Storage full", "Speicherplatz voll"))]
     QuotaExceeded,
-    #[error("Server meldet Fehler {status}: {message}")]
+    #[error("{} {status}: {message}", crate::lang::t("Server error", "Server meldet Fehler"))]
     Server { status: u16, message: String },
-    #[error("Server nicht erreichbar: {0}")]
+    #[error("{}: {0}", crate::lang::t("Server not reachable", "Server nicht erreichbar"))]
     Network(String),
-    #[error("Dateifehler: {0}")]
+    #[error("{}: {0}", crate::lang::t("File error", "Dateifehler"))]
     Io(#[from] std::io::Error),
 }
 
@@ -338,6 +338,18 @@ impl Api {
     }
 
     // ------------------------------------------------ Benutzerverwaltung (Admin)
+
+    /// Einmal-Link zur Konto-Website, gleich angemeldet (`page`: "admin" oder leer).
+    pub fn web_login_url(&self, page: &str) -> ApiResult<String> {
+        let v: serde_json::Value = Self::check(
+            self.auth(self.http.post(self.url("/account/web-login")))
+                .json(&serde_json::json!({ "page": page }))
+                .send()?,
+        )?
+        .json()?;
+        let path = v.get("url").and_then(|u| u.as_str()).unwrap_or("/account");
+        Ok(format!("{}{path}", self.server()))
+    }
 
     pub fn list_users(&self) -> ApiResult<Vec<UserInfo>> {
         Ok(Self::check(self.auth(self.http.get(self.url("/admin/users"))).send()?)?.json()?)

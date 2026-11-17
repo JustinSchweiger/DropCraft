@@ -1,9 +1,11 @@
+mod account;
 mod admin;
 mod auth;
 mod db;
 mod error;
 mod files;
 mod paths;
+mod settings;
 mod shares;
 mod webapp;
 
@@ -48,6 +50,8 @@ pub struct AppState {
     pub dummy_hash: Arc<String>,
     /// Geheimnis für Cookies passwortgeschützter Links.
     pub secret: Arc<String>,
+    /// Einmal-Codes, mit denen die Apps die Konto-Website öffnen.
+    pub login_codes: account::LoginCodes,
 }
 
 impl AppState {
@@ -80,10 +84,26 @@ pub fn router(state: AppState) -> Router {
         .route("/files/link", get(webapp::link))
         .route("/admin/users", get(admin::list_users).post(admin::create_user))
         .route("/admin/users/{id}", patch(admin::update_user).delete(admin::delete_user))
+        .route("/account/web-login", post(account::web_login))
         .route("/shares", get(shares::list).post(shares::create))
         .route("/shares/{token}", delete(shares::delete).patch(shares::update));
     let public = Router::new()
         .route("/", get(shares::landing))
+        .route("/account", get(account::home))
+        .route("/account/login", post(account::login))
+        .route("/account/logout", post(account::logout))
+        .route("/account/auth", get(account::auth_code))
+        .route("/account/lang", post(account::set_lang))
+        .route("/account/password", post(account::change_password))
+        .route("/account/devices/signout-others", post(account::signout_others))
+        .route("/account/devices/{id}/signout", post(account::signout_device))
+        .route("/account/links/{token}/end", post(account::end_link))
+        .route("/account/admin", get(account::admin_home))
+        .route("/account/admin/users", post(account::admin_create))
+        .route("/account/admin/users/{id}", get(account::admin_user).post(account::admin_update))
+        .route("/account/admin/users/{id}/signout", post(account::admin_signout))
+        .route("/account/admin/users/{id}/delete", post(account::admin_delete))
+        .route("/account/admin/settings", get(account::admin_settings).post(account::admin_save_settings))
         .route("/download/windows", get(shares::download_app))
         .route("/assets/upload.js", get(shares::upload_js))
         .route("/dl", get(webapp::dl))
@@ -116,7 +136,7 @@ async fn build_state(cfg: Config, clean_tmp: bool) -> anyhow::Result<AppState> {
     let db = db::connect(&cfg.data_dir).await?;
     let dummy_hash = auth::hash_password("dummy-password-for-timing")?;
     let secret = db::secret(&db).await?;
-    Ok(AppState { db, cfg: Arc::new(cfg), dummy_hash: Arc::new(dummy_hash), secret: Arc::new(secret) })
+    Ok(AppState { db, cfg: Arc::new(cfg), dummy_hash: Arc::new(dummy_hash), secret: Arc::new(secret), login_codes: Default::default() })
 }
 
 /// `dropcraft-server adduser <name> <quota_gb> [--admin]`

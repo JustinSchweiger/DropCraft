@@ -45,7 +45,7 @@ mod win {
     };
 
     use super::Next;
-    use crate::{updater, INSTANCE_PORT};
+    use crate::{i18n::t, updater, INSTANCE_PORT};
 
     const UNINSTALL_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\DropCraft";
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -95,7 +95,7 @@ mod win {
             return match install(false) {
                 Ok(()) => Next::Exit,
                 Err(e) => {
-                    message(&format!("DropCraft konnte nicht installiert werden:\n\n{e}"), MB_OK | MB_ICONERROR);
+                    message(&tf!("DropCraft could not be installed:\n\n{e}", "DropCraft konnte nicht installiert werden:\n\n{e}"), MB_OK | MB_ICONERROR);
                     Next::Exit
                 }
             };
@@ -108,7 +108,11 @@ mod win {
         let this = updater::version();
         let (text, flags) = match installed_version() {
             None => (
-                format!(
+                tf!(
+                    "Install DropCraft {this} on this PC?\n\n\
+                     It is copied to\n{}\nand gets an entry in the Start menu and under “Apps”, \
+                     starts with Windows and keeps itself up to date. No admin rights needed.\n\n\
+                     Yes = install\nNo = just run it from here this time",
                     "DropCraft {this} auf diesem PC installieren?\n\n\
                      Das Programm wird nach\n{}\nkopiert, bekommt einen Eintrag im Startmenü und unter „Apps“, \
                      startet mit Windows und hält sich selbst aktuell. Adminrechte sind nicht nötig.\n\n\
@@ -118,7 +122,9 @@ mod win {
                 MB_YESNOCANCEL | MB_ICONQUESTION,
             ),
             Some(v) => (
-                format!(
+                tf!(
+                    "DropCraft is already installed (version {v}).\nThis file is version {this}.\n\n\
+                     Yes = replace the installed version with this one\nNo = start the installed version",
                     "DropCraft ist bereits installiert (Version {v}).\nDiese Datei ist Version {this}.\n\n\
                      Ja = installierte Version durch diese ersetzen\nNein = installierte Version starten"
                 ),
@@ -128,7 +134,7 @@ mod win {
         match message(&text, flags) {
             IDYES => {
                 if let Err(e) = install(true) {
-                    message(&format!("DropCraft konnte nicht installiert werden:\n\n{e}"), MB_OK | MB_ICONERROR);
+                    message(&tf!("DropCraft could not be installed:\n\n{e}", "DropCraft konnte nicht installiert werden:\n\n{e}"), MB_OK | MB_ICONERROR);
                 }
                 Next::Exit
             }
@@ -151,7 +157,7 @@ mod win {
         if !same_file(&me, &target) {
             std::fs::create_dir_all(install_dir()).map_err(|e| format!("{}: {e}", install_dir().display()))?;
             let tmp = install_dir().join(format!(".dropcraft-install-{}", std::process::id()));
-            std::fs::copy(&me, &tmp).map_err(|e| format!("Kopieren nach {}: {e}", tmp.display()))?;
+            std::fs::copy(&me, &tmp).map_err(|e| tf!("Copy to {}: {e}", "Kopieren nach {}: {e}", tmp.display()))?;
             // Eine eben beendete Instanz gibt die Datei manchmal erst kurz danach frei.
             let mut last = None;
             for _ in 0..40 {
@@ -168,10 +174,10 @@ mod win {
             }
             if let Some(e) = last {
                 let _ = std::fs::remove_file(&tmp);
-                return Err(format!("{} ersetzen: {e}", target.display()));
+                return Err(tf!("Replace {}: {e}", "{} ersetzen: {e}", target.display()));
             }
         }
-        write_uninstall_entry(&target).map_err(|e| format!("Eintrag unter „Apps“: {e}"))?;
+        write_uninstall_entry(&target).map_err(|e| tf!("Entry under “Apps”: {e}", "Eintrag unter „Apps“: {e}"))?;
         if crate::shellmenu::supported() {
             if crate::shellmenu::is_set_up() {
                 let _ = crate::shellmenu::ensure_dll(&install_dir());
@@ -181,27 +187,34 @@ mod win {
         }
         // Startmenü-Verknüpfung, Explorer-Rechtsklick und „Mit Windows starten“
         // richtet die installierte Kopie beim Start selbst ein (siehe `on_start`).
-        Command::new(&target).spawn().map_err(|e| format!("Starten: {e}"))?;
+        Command::new(&target).spawn().map_err(|e| tf!("Start: {e}", "Starten: {e}"))?;
         Ok(())
     }
 
     /// Fragt nach und richtet das Windows-11-Explorer-Menü ein.
     fn setup_menu_interactive(ask: bool) {
         if !crate::shellmenu::supported() {
-            message("Das Explorer-Menü gibt es erst ab Windows 11.", MB_OK | MB_ICONINFORMATION);
+            message(t("The Explorer menu needs Windows 11.", "Das Explorer-Menü gibt es erst ab Windows 11."), MB_OK | MB_ICONINFORMATION);
             return;
         }
         if !installed_exe().exists() {
-            message("Bitte DropCraft zuerst installieren.", MB_OK | MB_ICONINFORMATION);
+            message(t("Please install DropCraft first.", "Bitte DropCraft zuerst installieren."), MB_OK | MB_ICONINFORMATION);
             return;
         }
         if ask
             && message(
-                "„DropCraft“ auch direkt ins Rechtsklick-Menü des Explorers aufnehmen?
-
-                 Dort gibt es dann für Dateien und Ordner in deinen Sync-Ordnern „DropCraft-Link kopieren“,                  „Freigeben …“ und „Im Browser anzeigen“ – ohne Umweg über „Weitere Optionen anzeigen“.
-
-                 Dafür signiert DropCraft ein kleines Paket mit einem eigenen Zertifikat. Windows fragt einmal                  nach Adminrechten, um diesem Zertifikat zu vertrauen. Später geht das auch in den Einstellungen.",
+                t(
+                    "Also add “DropCraft” to the Explorer right-click menu?\n\n\
+                     Files and folders in your sync folders then offer “Copy DropCraft link”, “Share …” and \
+                     “View in browser” directly, without going through “Show more options”.\n\n\
+                     For this, DropCraft signs a small package with a certificate of its own. Windows asks once for \
+                     admin rights to trust that certificate. You can also do this later in Settings.",
+                    "„DropCraft“ auch direkt ins Rechtsklick-Menü des Explorers aufnehmen?\n\n\
+                     Dateien und Ordner in deinen Sync-Ordnern bieten dann direkt „DropCraft-Link kopieren“, \
+                     „Freigeben …“ und „Im Browser anzeigen“ – ohne Umweg über „Weitere Optionen anzeigen“.\n\n\
+                     Dafür signiert DropCraft ein kleines Paket mit einem eigenen Zertifikat. Windows fragt einmal \
+                     nach Adminrechten, um diesem Zertifikat zu vertrauen. Später geht das auch in den Einstellungen.",
+                ),
                 MB_YESNO | MB_ICONQUESTION,
             ) != IDYES
         {
@@ -209,12 +222,19 @@ mod win {
         }
         match crate::shellmenu::setup(&install_dir()) {
             Ok(()) => {
-                message("Das Explorer-Menü ist eingerichtet. Rechtsklick auf eine Datei in deinem DropCraft-Ordner › „DropCraft“.", MB_OK | MB_ICONINFORMATION);
+                message(
+                    t(
+                        "The Explorer menu is set up. Right-click a file in your DropCraft folder › “DropCraft”.",
+                        "Das Explorer-Menü ist eingerichtet. Rechtsklick auf eine Datei in deinem DropCraft-Ordner › „DropCraft“.",
+                    ),
+                    MB_OK | MB_ICONINFORMATION,
+                );
             }
             Err(e) => {
-                message(&format!("Das Explorer-Menü konnte nicht eingerichtet werden:
-
-{e}"), MB_OK | MB_ICONERROR);
+                message(
+                    &tf!("The Explorer menu could not be set up:\n\n{e}", "Das Explorer-Menü konnte nicht eingerichtet werden:\n\n{e}"),
+                    MB_OK | MB_ICONERROR,
+                );
             }
         }
     }
@@ -303,7 +323,10 @@ mod win {
     pub fn uninstall(quiet: bool) {
         if !quiet
             && message(
-                "DropCraft deinstallieren?\n\nDeine Dateien in den Sync-Ordnern bleiben erhalten.",
+                t(
+                    "Uninstall DropCraft?\n\nYour files in the sync folders stay.",
+                    "DropCraft deinstallieren?\n\nDeine Dateien in den Sync-Ordnern bleiben erhalten.",
+                ),
                 MB_OKCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2,
             ) != IDOK
         {
@@ -314,15 +337,21 @@ mod win {
         let remove_all = !quiet
             && has_accounts
             && message(
-                &format!(
+                &tf!(
+                    "Keep accounts and settings?\n\n\
+                     Yes = keep: after reinstalling, everything continues without signing in again.\n\
+                     No = sign out the accounts and delete the settings ({}).{}",
                     "Konten und Einstellungen behalten?\n\n\
                      Ja = behalten: Nach einer erneuten Installation geht es ohne neue Anmeldung weiter.\n\
                      Nein = Konten abmelden und Einstellungen löschen ({}).{}",
                     crate::config::app_dir().display(),
-                    if cfg!(feature = "cloud-files") {
-                        "\n\nNur-online-Dateien (Wolkensymbol) lassen sich danach im Ordner nicht mehr öffnen, sie bleiben aber auf dem Server."
-                    } else {
+                    if !cfg!(feature = "cloud-files") {
                         ""
+                    } else {
+                        t(
+                            "\n\nOnline-only files (cloud icon) can no longer be opened in the folder afterwards, but they stay on the server.",
+                            "\n\nNur-online-Dateien (Wolkensymbol) lassen sich danach im Ordner nicht mehr öffnen, sie bleiben aber auf dem Server.",
+                        )
                     }
                 ),
                 MB_YESNO | MB_ICONQUESTION,
@@ -360,7 +389,7 @@ mod win {
             }
         }
         if !quiet {
-            message("DropCraft wurde deinstalliert.", MB_OK | MB_ICONINFORMATION);
+            message(t("DropCraft was uninstalled.", "DropCraft wurde deinstalliert."), MB_OK | MB_ICONINFORMATION);
         }
     }
 

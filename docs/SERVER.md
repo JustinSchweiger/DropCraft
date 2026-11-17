@@ -19,6 +19,8 @@ cd /opt/dropcraft/deploy
 docker compose exec -it dropcraft dropcraft-server adduser justin 100 --admin
 ```
 
+Everything after that happens on the [account website](#account-website).
+
 | Task | Command |
 |---|---|
 | Update | `git pull && docker compose up -d --build` |
@@ -26,10 +28,35 @@ docker compose exec -it dropcraft dropcraft-server adduser justin 100 --admin
 | Backup | Back up `deploy/data/` (database and all files) |
 
 **A second server** (for example only for one other account): install it the same way and
-create just that one account. Without `--admin` it is a normal user; change its storage with
-`docker compose exec dropcraft dropcraft-server …` or create the account again.
+create just that one account.
+
+## Account website
+
+`https://<domain>/account`, in English (default) or German. Sign in with any account, or use
+*Manage account* in the Windows, macOS, iOS or web app, which opens it already signed in (a
+one-time code, valid for two minutes).
+
+**Every user** sees their storage, changes their password, sees all signed-in devices (apps,
+browsers, the website itself) and signs them out, and lists and ends their share links.
+
+**Admins** additionally get the administration:
+
+- **Overview**: users, storage used and assigned, files, links, devices, free disk space.
+- **Users**: create (name, password, storage, administrator), change storage, set a new password
+  (signs the user out everywhere), make admin, **disable** (no sign-in, apps stop syncing, files
+  stay), sign out on all devices, delete with all files (type the name to confirm). Your own
+  account always stays admin and active.
+- **Server settings**: site name, open registration, storage for new accounts, minimum password
+  length, how long the website stays signed in, share links on/off (off also blocks existing
+  links), guest uploads on/off, default expiry for new links.
+
+The website needs no JavaScript. Its session cookie is `HttpOnly` and `SameSite=Strict`, and every
+form also checks that it comes from the same site.
 
 ## Settings (`deploy/.env`)
+
+These are only the starting values. Once an admin saves the server settings on the website,
+those win.
 
 | Variable | Meaning | Default |
 |---|---|---|

@@ -1,9 +1,11 @@
 import SwiftUI
 
-/// Konto-Tab: Speicher, Konten, Benutzerverwaltung (nur Admin).
+/// Konto-Tab: Speicher, Konten, Link zur Konto-Website (Passwort, Geräte,
+/// Links; für Admins auch Benutzer und Server-Einstellungen).
 @MainActor
 struct AccountView: View {
     @EnvironmentObject var model: AppModel
+    @Environment(\.openURL) private var openURL
     @State private var addAccount = false
     @State private var confirmRemove = false
     @State private var cacheSize: Int64 = 0
@@ -52,14 +54,19 @@ struct AccountView: View {
                 }
                 .listRowBackground(DC.raised)
 
-                if model.me?.isAdmin == true {
-                    Section {
-                        NavigationLink { UsersView() } label: { Label("Benutzer verwalten", systemImage: "person.2") }
-                    } header: {
-                        SectionLabel("Server")
+                Section {
+                    Button { openAccountSite() } label: {
+                        Label(model.me?.isAdmin == true ? "Konto & Server verwalten" : "Konto verwalten",
+                              systemImage: model.me?.isAdmin == true ? "person.2" : "person.crop.circle")
                     }
-                    .listRowBackground(DC.raised)
+                } header: {
+                    SectionLabel("Web")
+                } footer: {
+                    Text(model.me?.isAdmin == true
+                         ? "Passwort, Geräte, Links, Benutzer und Server-Einstellungen – öffnet sich im Browser."
+                         : "Passwort, Geräte und Links – öffnet sich im Browser.")
                 }
+                .listRowBackground(DC.raised)
 
                 Section {
                     LabeledContent("Gerät", value: model.selected?.deviceName ?? "")
@@ -111,6 +118,19 @@ struct AccountView: View {
             total += Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
         }
         return total
+    }
+
+    /// Öffnet die Konto-Website, gleich angemeldet (Einmal-Code vom Server).
+    private func openAccountSite() {
+        guard let api = model.api else { return }
+        let admin = model.me?.isAdmin == true
+        Task {
+            if let url = try? await api.webLoginURL(admin: admin) {
+                openURL(url)
+            } else if let url = URL(string: api.server + "/account") {
+                openURL(url)
+            }
+        }
     }
 
     private func clearCache() {

@@ -100,6 +100,10 @@ async fn apply_settings(state: &AppState, token: &str, s: &Settings) -> ApiResul
 /// Legt einen Link an (oder gibt den bestehenden für diesen Pfad zurück).
 pub async fn create(State(state): State<AppState>, user: AuthUser, Json(req): Json<CreateReq>) -> ApiResult<Json<Share>> {
     let path = paths::normalize_non_root(&req.path)?;
+    let cfg = crate::settings::load(&state).await;
+    if !cfg.links_enabled {
+        return Err(ApiError::BadRequest("Share links are turned off on this server / Freigabe-Links sind auf diesem Server ausgeschaltet".into()));
+    }
     if files::get_live_pool(&state, user.id, &path).await?.is_none() {
         return Err(ApiError::NotFound);
     }
@@ -114,11 +118,14 @@ pub async fn create(State(state): State<AppState>, user: AuthUser, Json(req): Js
             let mut raw = [0u8; 12];
             rand::rngs::OsRng.fill_bytes(&mut raw);
             let token = hex::encode(raw);
-            sqlx::query("INSERT INTO shares (token, user_id, path, created_at) VALUES (?, ?, ?, ?)")
+            // Standard-Ablauf aus den Server-Einstellungen
+            let expires = (cfg.link_expiry_days > 0).then(|| now_ms() + cfg.link_expiry_days as i64 * 86_400_000);
+            sqlx::query("INSERT INTO shares (token, user_id, path, created_at, expires_at) VALUES (?, ?, ?, ?, ?)")
                 .bind(&token)
                 .bind(user.id)
                 .bind(&path)
                 .bind(now_ms())
+                .bind(expires)
                 .execute(&state.db)
                 .await?;
             token
@@ -210,6 +217,11 @@ async fn resolve(state: &AppState, token: &str, rel: &str, headers: &HeaderMap) 
         .await
         .map_err(|e| ApiError::from(e).into_response())?;
     let Some((user_id, root, allow_upload, pw_hash, expires_at)) = row else { return Err(not_found_page()) };
+    let cfg = crate::settings::load(state).await;
+    if !cfg.links_enabled {
+        return Err(not_found_page());
+    }
+    let allow_upload = allow_upload && cfg.guest_upload;
     if expires_at.map(|t| t < now_ms()).unwrap_or(false) {
         return Err(message_page(StatusCode::GONE, "Link abgelaufen", "Diese Freigabe ist nicht mehr gültig."));
     }
@@ -594,11 +606,13 @@ pub async fn landing(State(state): State<AppState>) -> Response {
     } else {
         download
     };
+    let site = esc(&crate::settings::load(&state).await.site_name);
     let body = format!(
-        r#"<section class="hero"><div class="hero-logo">{ICON_LOGO_BIG}</div><h1>DropCraft</h1>
+        r#"<section class="hero"><div class="hero-logo">{ICON_LOGO_BIG}</div><h1>{site}</h1>
 <p class="lead">Private Cloud zum Synchronisieren und Teilen von Dateien.</p>
 <div class="hero-actions"><a class="btn primary big" href="/app/">Im Browser öffnen</a>{download}</div>
-<p class="meta">Du hast einen Link bekommen? Öffne ihn einfach direkt – dafür brauchst du nichts zu installieren.</p></section>"#
+<p class="meta">Du hast einen Link bekommen? Öffne ihn einfach direkt – dafür brauchst du nichts zu installieren.</p>
+<p class="meta"><a class="link-plain" href="/account">Konto verwalten · Manage account</a></p></section>"#
     );
     page_html("DropCraft", &body)
 }
@@ -733,7 +747,7 @@ fn password_page(token: &str, wrong: bool) -> Response {
 fn page_html(title: &str, main: &str) -> Response {
     let html = format!(
         r#"<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="robots" content="noindex"><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect width='20' height='20' rx='4' fill='%230b0e12'/%3E%3Cpath d='M10 2.5l6.5 3.75v7.5L10 17.5l-6.5-3.75v-7.5z M3.5 6.25L10 10l6.5-3.75M10 10v7.5' fill='none' stroke='%2319e3f0' stroke-width='1.4' stroke-linejoin='round'/%3E%3C/svg%3E"><title>{title} · DropCraft</title><style>{CSS}</style></head>
+<meta name="robots" content="noindex"><link rel="icon" href="/app/icon-192.png"><title>{title} · DropCraft</title><style>{CSS}</style></head>
 <body><header><a class="brand" href="/">{ICON_LOGO}<span>DROPCRAFT</span></a></header>
 <main>{main}</main></body></html>"#
     );
@@ -887,7 +901,7 @@ pub fn device_label(ua: &str) -> String {
     }
 }
 
-fn esc(s: &str) -> String {
+pub(crate) fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;")
 }
 
@@ -898,6 +912,27 @@ fn url_q(s: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+/// Größe für die Konto-Website (Deutsch mit Komma).
+pub(crate) fn human_l(de: bool, b: i64) -> String {
+    let s = human(b);
+    if de {
+        s
+    } else {
+        s.replace(',', ".")
+    }
+}
+
+/// Datum und Uhrzeit (Ortszeit) für die Konto-Website.
+pub(crate) fn date_time_l(de: bool, ms: i64) -> String {
+    if de {
+        return date_time(ms);
+    }
+    let l = local_ms(ms);
+    let (y, m, d) = civil_from_days(l.div_euclid(86_400_000));
+    let mins = l.rem_euclid(86_400_000) / 60_000;
+    format!("{y}-{m:02}-{d:02} {:02}:{:02}", mins / 60, mins % 60)
 }
 
 fn human(b: i64) -> String {
@@ -981,7 +1016,7 @@ fn is_viewable(name: &str) -> bool {
 }
 
 /// App-Logo (Tropfen mit Sync-Pfeilen), wie im Programmsymbol (client/desktop/src/icons.rs).
-const ICON_LOGO: &str = r##"<svg width="24" height="24" viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="dcb" x1="0" y1="0" x2=".35" y2="1"><stop offset="0" stop-color="#1747b8"/><stop offset="1" stop-color="#071538"/></linearGradient><radialGradient id="dcg" cx="61" cy="1" r="22" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#3fd4ff" stop-opacity=".55"/><stop offset="1" stop-color="#3fd4ff" stop-opacity="0"/></radialGradient><linearGradient id="dcd" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5ff4ff"/><stop offset="1" stop-color="#2f7bff"/></linearGradient><linearGradient id="dcv" x1="1" y1="0" x2="0" y2="1"><stop offset=".35" stop-color="#8a5cff" stop-opacity="0"/><stop offset="1" stop-color="#8a5cff" stop-opacity=".6"/></linearGradient><filter id="dcf" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="2.4"/></filter></defs><rect x="1.92" y="1.92" width="60.16" height="60.16" rx="13.24" fill="url(#dcb)"/><rect x="1.92" y="1.92" width="60.16" height="60.16" rx="13.24" fill="url(#dcg)"/><rect x="2.52" y="2.52" width="58.96" height="58.96" rx="12.64" fill="none" stroke="#5aa8ff" stroke-opacity=".4" stroke-width=".8"/><path d="M30.36 9.88A1.92 1.92 0 0 1 33.64 9.88L45.91 29.86A16.32 16.32 0 1 1 18.09 29.86Z" fill="#29d9ff" opacity=".45" filter="url(#dcf)"/><path d="M30.36 9.88A1.92 1.92 0 0 1 33.64 9.88L45.91 29.86A16.32 16.32 0 1 1 18.09 29.86Z" fill="url(#dcd)"/><path d="M30.36 9.88A1.92 1.92 0 0 1 33.64 9.88L45.91 29.86A16.32 16.32 0 1 1 18.09 29.86Z" fill="url(#dcv)"/><path d="M24.48 35.98A8 8 0 0 1 38.93 34.72M39.52 41.46A8 8 0 0 1 25.07 42.72" fill="none" stroke="#fff" stroke-width="2.88" stroke-linecap="round"/><path d="M41.09 38.46L42.36 32.74L35.49 36.7ZM22.91 38.98L21.64 44.7L28.51 40.74Z" fill="#fff"/></svg>"##;
+pub(crate) const ICON_LOGO: &str = r##"<svg width="24" height="24" viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="dcb" x1="0" y1="0" x2=".35" y2="1"><stop offset="0" stop-color="#1747b8"/><stop offset="1" stop-color="#071538"/></linearGradient><radialGradient id="dcg" cx="61" cy="1" r="22" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#3fd4ff" stop-opacity=".55"/><stop offset="1" stop-color="#3fd4ff" stop-opacity="0"/></radialGradient><linearGradient id="dcd" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5ff4ff"/><stop offset="1" stop-color="#2f7bff"/></linearGradient><linearGradient id="dcv" x1="1" y1="0" x2="0" y2="1"><stop offset=".35" stop-color="#8a5cff" stop-opacity="0"/><stop offset="1" stop-color="#8a5cff" stop-opacity=".6"/></linearGradient><filter id="dcf" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="2.4"/></filter></defs><rect x="1.92" y="1.92" width="60.16" height="60.16" rx="13.24" fill="url(#dcb)"/><rect x="1.92" y="1.92" width="60.16" height="60.16" rx="13.24" fill="url(#dcg)"/><rect x="2.52" y="2.52" width="58.96" height="58.96" rx="12.64" fill="none" stroke="#5aa8ff" stroke-opacity=".4" stroke-width=".8"/><path d="M30.36 9.88A1.92 1.92 0 0 1 33.64 9.88L45.91 29.86A16.32 16.32 0 1 1 18.09 29.86Z" fill="#29d9ff" opacity=".45" filter="url(#dcf)"/><path d="M30.36 9.88A1.92 1.92 0 0 1 33.64 9.88L45.91 29.86A16.32 16.32 0 1 1 18.09 29.86Z" fill="url(#dcd)"/><path d="M30.36 9.88A1.92 1.92 0 0 1 33.64 9.88L45.91 29.86A16.32 16.32 0 1 1 18.09 29.86Z" fill="url(#dcv)"/><path d="M24.48 35.98A8 8 0 0 1 38.93 34.72M39.52 41.46A8 8 0 0 1 25.07 42.72" fill="none" stroke="#fff" stroke-width="2.88" stroke-linecap="round"/><path d="M41.09 38.46L42.36 32.74L35.49 36.7ZM22.91 38.98L21.64 44.7L28.51 40.74Z" fill="#fff"/></svg>"##;
 const ICON_FOLDER: &str = r##"<svg width="20" height="20" viewBox="0 0 16 16" fill="#0c5c64" stroke="#19e3f0" stroke-width="1.2" stroke-linejoin="round" aria-hidden="true"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg>"##;
 const ICON_FILE: &str = r##"<svg width="20" height="20" viewBox="0 0 16 16" fill="none" stroke="#95a2b0" stroke-width="1.2" stroke-linejoin="round" aria-hidden="true"><path d="M4 1.5h5l3 3v10H4z"/><path d="M9 1.5v3h3"/></svg>"##;
 const ICON_IMAGE: &str = r##"<svg width="20" height="20" viewBox="0 0 16 16" fill="none" stroke="#a084ff" stroke-width="1.2" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1"/><circle cx="6" cy="6.5" r="1"/><path d="M2.5 12l3.5-3.5 2.5 2.5 2-2 3 3"/></svg>"##;
@@ -992,8 +1027,8 @@ const ICON_UPLOAD_BIG: &str = r##"<svg width="34" height="34" viewBox="0 0 16 16
 const ICON_CLOCK: &str = r##"<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.5 1.5"/></svg>"##;
 const ICON_MEDIA: &str = r##"<svg width="20" height="20" viewBox="0 0 16 16" fill="none" stroke="#f45db8" stroke-width="1.2" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1"/><path d="M6.5 6v4l3.5-2z"/></svg>"##;
 const ICON_LOCK: &str = r##"<svg width="44" height="44" viewBox="0 0 16 16" fill="none" stroke="#19e3f0" stroke-width="1.1" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="10" height="7" rx="1"/><path d="M5 7V5a3 3 0 0 1 6 0v2"/></svg>"##;
-const ICON_LOGO_BIG: &str = r##"<svg width="72" height="72" viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="dcb2" x1="0" y1="0" x2=".35" y2="1"><stop offset="0" stop-color="#1747b8"/><stop offset="1" stop-color="#071538"/></linearGradient><radialGradient id="dcg2" cx="61" cy="1" r="22" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#3fd4ff" stop-opacity=".55"/><stop offset="1" stop-color="#3fd4ff" stop-opacity="0"/></radialGradient><linearGradient id="dcd2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5ff4ff"/><stop offset="1" stop-color="#2f7bff"/></linearGradient><linearGradient id="dcv2" x1="1" y1="0" x2="0" y2="1"><stop offset=".35" stop-color="#8a5cff" stop-opacity="0"/><stop offset="1" stop-color="#8a5cff" stop-opacity=".6"/></linearGradient><filter id="dcf2" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="2.4"/></filter></defs><rect x="1.92" y="1.92" width="60.16" height="60.16" rx="13.24" fill="url(#dcb2)"/><rect x="1.92" y="1.92" width="60.16" height="60.16" rx="13.24" fill="url(#dcg2)"/><rect x="2.52" y="2.52" width="58.96" height="58.96" rx="12.64" fill="none" stroke="#5aa8ff" stroke-opacity=".4" stroke-width=".8"/><path d="M30.36 9.88A1.92 1.92 0 0 1 33.64 9.88L45.91 29.86A16.32 16.32 0 1 1 18.09 29.86Z" fill="#29d9ff" opacity=".45" filter="url(#dcf2)"/><path d="M30.36 9.88A1.92 1.92 0 0 1 33.64 9.88L45.91 29.86A16.32 16.32 0 1 1 18.09 29.86Z" fill="url(#dcd2)"/><path d="M30.36 9.88A1.92 1.92 0 0 1 33.64 9.88L45.91 29.86A16.32 16.32 0 1 1 18.09 29.86Z" fill="url(#dcv2)"/><path d="M24.48 35.98A8 8 0 0 1 38.93 34.72M39.52 41.46A8 8 0 0 1 25.07 42.72" fill="none" stroke="#fff" stroke-width="2.88" stroke-linecap="round"/><path d="M41.09 38.46L42.36 32.74L35.49 36.7ZM22.91 38.98L21.64 44.7L28.51 40.74Z" fill="#fff"/></svg>"##;
-const CSS: &str = r#"
+pub(crate) const ICON_LOGO_BIG: &str = r##"<svg width="72" height="72" viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="dcb2" x1="0" y1="0" x2=".35" y2="1"><stop offset="0" stop-color="#1747b8"/><stop offset="1" stop-color="#071538"/></linearGradient><radialGradient id="dcg2" cx="61" cy="1" r="22" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#3fd4ff" stop-opacity=".55"/><stop offset="1" stop-color="#3fd4ff" stop-opacity="0"/></radialGradient><linearGradient id="dcd2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#5ff4ff"/><stop offset="1" stop-color="#2f7bff"/></linearGradient><linearGradient id="dcv2" x1="1" y1="0" x2="0" y2="1"><stop offset=".35" stop-color="#8a5cff" stop-opacity="0"/><stop offset="1" stop-color="#8a5cff" stop-opacity=".6"/></linearGradient><filter id="dcf2" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="2.4"/></filter></defs><rect x="1.92" y="1.92" width="60.16" height="60.16" rx="13.24" fill="url(#dcb2)"/><rect x="1.92" y="1.92" width="60.16" height="60.16" rx="13.24" fill="url(#dcg2)"/><rect x="2.52" y="2.52" width="58.96" height="58.96" rx="12.64" fill="none" stroke="#5aa8ff" stroke-opacity=".4" stroke-width=".8"/><path d="M30.36 9.88A1.92 1.92 0 0 1 33.64 9.88L45.91 29.86A16.32 16.32 0 1 1 18.09 29.86Z" fill="#29d9ff" opacity=".45" filter="url(#dcf2)"/><path d="M30.36 9.88A1.92 1.92 0 0 1 33.64 9.88L45.91 29.86A16.32 16.32 0 1 1 18.09 29.86Z" fill="url(#dcd2)"/><path d="M30.36 9.88A1.92 1.92 0 0 1 33.64 9.88L45.91 29.86A16.32 16.32 0 1 1 18.09 29.86Z" fill="url(#dcv2)"/><path d="M24.48 35.98A8 8 0 0 1 38.93 34.72M39.52 41.46A8 8 0 0 1 25.07 42.72" fill="none" stroke="#fff" stroke-width="2.88" stroke-linecap="round"/><path d="M41.09 38.46L42.36 32.74L35.49 36.7ZM22.91 38.98L21.64 44.7L28.51 40.74Z" fill="#fff"/></svg>"##;
+pub(crate) const CSS: &str = r#"
 *{box-sizing:border-box}
 body{margin:0;background:#0b0e12;color:#e6ecf2;font:15px/1.45 "Segoe UI",Ubuntu,system-ui,sans-serif}
 header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 20px;border-bottom:1px solid #28303a;background:#0b0e12}
@@ -1056,6 +1091,7 @@ audio.viewer-media{width:100%;margin:40px 16px}
 .hero .meta{white-space:normal}
 .hero h1{font-size:36px;margin:0}
 .lead{font-size:18px;color:#95a2b0;margin:0}
+.link-plain{color:#95a2b0}.link-plain:hover{color:#19e3f0}
 .hero-actions{display:flex;flex-direction:column;align-items:center;gap:8px;margin:16px 0}
 .btn.big{height:48px;padding:0 20px;font-size:13px}
 .pw{display:flex;flex-direction:column;gap:12px;width:100%;max-width:320px;text-align:left}

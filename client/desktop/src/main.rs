@@ -1,6 +1,8 @@
 // Unter Windows ohne Konsolenfenster starten.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+#[macro_use]
+mod i18n;
 mod actions;
 mod app;
 #[cfg(all(windows, feature = "cloud-files"))]
@@ -29,6 +31,8 @@ pub(crate) const INSTANCE_PORT: u16 = 47819;
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
+    // Sprache zuerst: auch Installer-Fragen und Meldungen folgen ihr.
+    i18n::apply(&config::Config::load().language);
     // Für das macOS-Bundle: `DropCraft --export-iconset <Ordner>.iconset`
     if let Some(dir) = args.iter().position(|a| a == "--export-iconset").and_then(|i| args.get(i + 1)) {
         if let Err(e) = icons::export_iconset(std::path::Path::new(dir)) {
@@ -39,7 +43,7 @@ fn main() -> eframe::Result {
     // Für Web-App und iOS: `DropCraft --export-png <Datei> <Größe> [--full-bleed]`
     if let Some(i) = args.iter().position(|a| a == "--export-png") {
         let (Some(path), Some(size)) = (args.get(i + 1), args.get(i + 2).and_then(|s| s.parse::<u32>().ok())) else {
-            eprintln!("--export-png <Datei> <Größe> [--full-bleed]");
+            eprintln!("--export-png <file> <size> [--full-bleed]");
             return Ok(());
         };
         let rgba = if args.iter().any(|a| a == "--full-bleed") { icons::logo_full_bleed_rgba(size) } else { icons::logo_rgba(size) };

@@ -7,24 +7,27 @@
 
 - **Popup above the taskbar.** Click the DropCraft icon to open it; click elsewhere or press Esc to
   close it. Right-click the icon for *Open*, *Pause* and *Quit*.
-- **Starts silently.** With *Mit Windows starten* on, DropCraft starts in the tray at sign-in
+- **Starts silently.** With *Start with Windows* on, DropCraft starts in the tray at sign-in
   and after updates, without showing the popup.
 - **Live statistics.** The current file with progress, speed, files and size left, time left, queue.
 - **Tray icon.** Spins while syncing; grey = paused, yellow = needs attention. The tooltip shows
   what is left.
-- **Several accounts.** *Konto › Konto hinzufügen …*. Each account has its own server, sign-in and
+- **Several accounts.** *Account › Add another account*. Each account has its own server, sign-in and
   sync folder. Folders must not overlap. Switch between accounts at the top of the popup.
-- **Managing users** (admin accounts only): *Konto › Benutzer verwalten …*. Enter a name,
-  password and storage in GB. Change storage, reset passwords, delete users. New users are never admins.
-- **Settings.** Upload and download limits; *Pausieren* stops running transfers at once.
+- **Manage account** (*Account › Manage account …*) opens the account website of your server in the
+  browser, already signed in: password, signed-in devices, share links, and for admins users and
+  server settings. See [SERVER.md](SERVER.md#account-website).
+- **Language.** *Settings › Language*: English (default) or Deutsch. Also changes the Explorer menu,
+  notifications and the installer dialogs.
+- **Settings.** Upload and download limits; *Pause* stops running transfers at once.
 - **Conflicts.** If a file changes on two devices at once, the local version is kept as
-  `Name (Konflikt Gerät Datum).ext`.
+  `Name (Conflict Device Date).ext` (German: `Konflikt`).
 - **Ignored files** include Office lock files `~$…`, `*.tmp`, `desktop.ini` and `Thumbs.db`.
 
 ## Share links
 
-Right-click a file or folder in a sync folder › **DropCraft** › *DropCraft-Link kopieren*, or use the
-popup: *Konto › Freigaben …*. The link opens a web page with the content, single downloads and
+Right-click a file or folder in a sync folder › **DropCraft** › *Copy DropCraft link*, or use the
+*Shares* tab in the popup. All your links are also listed on the account website, where you can end them. The link opens a web page with the content, single downloads and
 *Alles als ZIP*, no DropCraft needed. Photos and videos show as a gallery with preview.
 
 Per link you can allow uploads by guests, set a password and an expiry date, and turn on
@@ -37,11 +40,12 @@ On Windows 11, right-click any file or folder in a sync folder (or the empty spa
 
 | Entry | What it does |
 |---|---|
-| **DropCraft-Link kopieren** | Creates the link (or reuses the existing one), copies it and confirms with a notification. No window opens |
-| **Freigeben …** | Opens the popup on this link with all its options |
-| **Im Browser anzeigen** | Opens the web app in this folder (for a file: the folder it is in) |
+| **Copy DropCraft link** | Creates the link (or reuses the existing one), copies it and confirms with a notification. No window opens |
+| **Share …** | Opens the popup on this link with all its options |
+| **View in browser** | Opens the web app in this folder (for a file: the folder it is in) |
 
-The entry is hidden outside the sync folders. The sync folder itself only offers *Im Browser anzeigen*.
+The entry is hidden outside the sync folders. The sync folder itself only offers *View in browser*.
+The entries follow the app's language.
 
 **Why the admin prompt?** Windows 11 only puts entries from signed app packages at the top of
 the menu. Apps like Dropbox use a purchased certificate. DropCraft instead builds the small
@@ -50,11 +54,11 @@ to trust that certificate, and deletes the certificate's private key right away,
 can ever be signed with it. The menu itself is a small DLL (`DropCraftShell.dll`) next to
 `DropCraft.exe`; it is part of the program and is updated with it.
 
-Set it up during installation or later under *Einstellungen › Explorer-Menü*. Uninstalling
+Set it up during installation or later under *Settings › Explorer menu*. Uninstalling
 DropCraft removes the package; the trusted certificate stays but is useless without its key.
 
-On Windows 10, and on Windows 11 under *Weitere Optionen anzeigen*, the classic entry
-*DropCraft-Link kopieren* is available as well.
+On Windows 10, and on Windows 11 under *Show more options*, the classic entry
+*Copy DropCraft link* is available as well.
 
 ## Files on demand
 
@@ -63,18 +67,18 @@ Built with `--features cloud-files` (the default download `DropCraft-Windows.exe
 - The sync folder is registered with Windows as a cloud folder and appears in Explorer's navigation pane.
 - New files from the server appear as **placeholders** (cloud icon) and download when opened.
 - **Status column** in Explorer: cloud = online only, tick = on this device, filled tick = always available.
-- Right-click › **Immer auf diesem Gerät behalten** downloads a folder and keeps it current;
-  **Speicherplatz freigeben** turns it back into placeholders.
+- Right-click › **Always keep on this device** downloads a folder and keeps it current;
+  **Free up space** turns it back into placeholders (Windows' own entries).
 - Before an account is removed, all placeholders are downloaded.
 
 ## Install, update, uninstall
 
 - **Install.** Double-click `DropCraft.exe`. It offers to copy itself to
   `%LOCALAPPDATA%\Programs\DropCraft\` (no admin rights), with an entry under *Settings › Apps*,
-  the Start menu and *start with Windows*. *Nein* runs it once from where it is (portable).
+  the Start menu and *start with Windows*. *No* runs it once from where it is (portable).
 - **Already installed?** It asks whether to replace the installed version or start it. A running
   DropCraft is closed first.
-- **Updates** come from `https://dropcraft.tech/updates/latest.json` (*Einstellungen › Updates*),
+- **Updates** come from `https://dropcraft.tech/updates/latest.json` (*Settings › Updates*),
   automatically or after a click. The program folder belongs to you, so no admin rights are needed.
 - **Uninstall** under *Settings › Apps › DropCraft*. Your sync folders stay. You choose whether to
   keep accounts and settings for a later reinstall.

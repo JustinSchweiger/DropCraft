@@ -65,8 +65,9 @@ fn apply_windows(dir: &Path, ico: &Path) {
 
     let ini = dir.join("desktop.ini");
     let content = format!(
-        "[.ShellClassInfo]\r\nIconResource={},0\r\nInfoTip=DropCraft-Sync-Ordner\r\n[ViewState]\r\nMode=\r\nVid=\r\nFolderType=Generic\r\n",
-        ico.display()
+        "[.ShellClassInfo]\r\nIconResource={},0\r\nInfoTip={}\r\n[ViewState]\r\nMode=\r\nVid=\r\nFolderType=Generic\r\n",
+        ico.display(),
+        crate::i18n::t("DropCraft sync folder", "DropCraft-Sync-Ordner")
     );
     // UTF-16 mit BOM, damit Umlaute im Pfad funktionieren.
     let mut bytes = vec![0xFF, 0xFE];

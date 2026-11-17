@@ -90,7 +90,7 @@ pub fn is_set_up() -> bool {
 /// Explorer geladene DLL wird umbenannt (wie die .exe beim Update).
 pub fn ensure_dll(dir: &Path) -> Result<(), String> {
     if SHELL_DLL.is_empty() {
-        return Err("Dieser Build enthält kein Explorer-Menü".into());
+        return Err(crate::i18n::t("This build has no Explorer menu", "Dieser Build enthält kein Explorer-Menü").into());
     }
     let dll = dir.join(DLL_NAME);
     if std::fs::read(&dll).ok().as_deref() == Some(SHELL_DLL) {
@@ -124,7 +124,7 @@ pub fn refresh(dir: &Path) {
 /// Richtet das Menü ein (blockiert, zeigt die Admin-Abfrage von Windows).
 pub fn setup(dir: &Path) -> Result<(), String> {
     if !supported() {
-        return Err("Das Explorer-Menü gibt es erst ab Windows 11.".into());
+        return Err(crate::i18n::t("The Explorer menu needs Windows 11.", "Das Explorer-Menü gibt es erst ab Windows 11.").into());
     }
     ensure_dll(dir)?;
     let work = std::env::temp_dir().join(format!("dropcraft-menu-{}", std::process::id()));
@@ -156,13 +156,15 @@ fn setup_in(dir: &Path, work: &Path) -> Result<(), String> {
     powershell(&format!(
         "$ErrorActionPreference = 'Stop'; \
          try {{ $p = Start-Process -FilePath certutil.exe -ArgumentList '-addstore','TrustedPeople','\"{}\"' -Verb RunAs -WindowStyle Hidden -Wait -PassThru }} \
-         catch {{ throw 'Die Admin-Bestätigung wurde abgebrochen.' }}; \
-         if ($p.ExitCode -ne 0) {{ throw \"Zertifikat konnte nicht eingetragen werden (certutil $($p.ExitCode)).\" }}; \
+         catch {{ throw '{cancelled}' }}; \
+         if ($p.ExitCode -ne 0) {{ throw \"{cert_failed} (certutil $($p.ExitCode)).\" }}; \
          Get-AppxPackage -Name '{PACKAGE_NAME}' | Remove-AppxPackage; \
          Add-AppxPackage -Path '{}' -ExternalLocation '{}'",
         cer.display(),
         msix.display(),
-        dir.display()
+        dir.display(),
+        cancelled = crate::i18n::t("The admin approval was cancelled.", "Die Admin-Bestätigung wurde abgebrochen."),
+        cert_failed = crate::i18n::t("Could not add the certificate", "Zertifikat konnte nicht eingetragen werden"),
     ))?;
     Ok(())
 }

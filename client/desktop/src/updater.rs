@@ -95,7 +95,7 @@ fn client() -> Result<reqwest::blocking::Client, String> {
 pub fn check() -> Result<Option<Latest>, String> {
     let resp = client()?.get(UPDATE_URL).timeout(Duration::from_secs(20)).send().map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
-        return Err(format!("Update-Server antwortet mit {}", resp.status()));
+        return Err(tf!("Update server answered {}", "Update-Server antwortet mit {}", resp.status()));
     }
     let latest: Latest = resp.json().map_err(|e| e.to_string())?;
     Ok((newer(&latest.version, version()) && latest.file().is_some()).then_some(latest))
@@ -104,15 +104,15 @@ pub fn check() -> Result<Option<Latest>, String> {
 /// Lädt das Update, tauscht das Programm aus und startet es neu.
 /// Kehrt nur im Fehlerfall zurück.
 pub fn install(latest: &Latest, on_progress: impl Fn(f32)) -> Result<(), String> {
-    let file = latest.file().ok_or("Für diese Version gibt es keine Update-Datei")?;
+    let file = latest.file().ok_or(crate::i18n::t("There is no update file for this version", "Für diese Version gibt es keine Update-Datei"))?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let dir = exe.parent().ok_or("Programmordner nicht gefunden")?.to_path_buf();
+    let dir = exe.parent().ok_or(crate::i18n::t("Program folder not found", "Programmordner nicht gefunden"))?.to_path_buf();
     let tmp = dir.join(format!(".dropcraft-update-{}", std::process::id()));
     download(&format!("https://dropcraft.tech/updates/{}", file.name), &tmp, file.size, &on_progress)?;
     let sha = dropcraft_core::sync::hash_file(&tmp).map_err(|e| e.to_string())?;
     if !sha.eq_ignore_ascii_case(&file.sha256) {
         let _ = std::fs::remove_file(&tmp);
-        return Err("Prüfsumme des Updates stimmt nicht".into());
+        return Err(crate::i18n::t("The update checksum does not match", "Prüfsumme des Updates stimmt nicht").into());
     }
     replace_and_restart(&exe, &tmp)
 }
@@ -121,7 +121,7 @@ fn download(url: &str, dest: &Path, size: u64, on_progress: &impl Fn(f32)) -> Re
     use std::io::{Read, Write};
     let mut resp = client()?.get(url).send().map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
-        return Err(format!("Download fehlgeschlagen ({})", resp.status()));
+        return Err(tf!("Download failed ({})", "Download fehlgeschlagen ({})", resp.status()));
     }
     let mut out = std::fs::File::create(dest).map_err(|e| format!("{}: {e}", dest.display()))?;
     let mut buf = vec![0u8; 256 * 1024];
@@ -145,20 +145,20 @@ fn replace_and_restart(exe: &Path, new: &Path) -> Result<(), String> {
     // Eine laufende .exe darf umbenannt, aber nicht überschrieben werden.
     let old = exe.with_extension("exe.old");
     let _ = std::fs::remove_file(&old);
-    std::fs::rename(exe, &old).map_err(|e| format!("Programm umbenennen: {e}"))?;
+    std::fs::rename(exe, &old).map_err(|e| tf!("Rename program: {e}", "Programm umbenennen: {e}"))?;
     if let Err(e) = std::fs::rename(new, exe) {
         let _ = std::fs::rename(&old, exe);
-        return Err(format!("Update einsetzen: {e}"));
+        return Err(tf!("Install update: {e}", "Update einsetzen: {e}"));
     }
-    std::process::Command::new(exe).arg("--after-update").spawn().map_err(|e| format!("Neustart: {e}"))?;
+    std::process::Command::new(exe).arg("--after-update").spawn().map_err(|e| tf!("Restart: {e}", "Neustart: {e}"))?;
     std::process::exit(0);
 }
 
 #[cfg(target_os = "macos")]
 fn replace_and_restart(exe: &Path, zip: &Path) -> Result<(), String> {
     // exe = …/DropCraft.app/Contents/MacOS/DropCraft
-    let bundle: std::path::PathBuf = exe.ancestors().nth(3).ok_or("App-Bundle nicht gefunden")?.to_path_buf();
-    let parent = bundle.parent().ok_or("App-Ordner nicht gefunden")?;
+    let bundle: std::path::PathBuf = exe.ancestors().nth(3).ok_or(crate::i18n::t("App bundle not found", "App-Bundle nicht gefunden"))?.to_path_buf();
+    let parent = bundle.parent().ok_or(crate::i18n::t("App folder not found", "App-Ordner nicht gefunden"))?;
     let unpack = parent.join(format!(".dropcraft-update-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&unpack);
     let ok = std::process::Command::new("ditto")
@@ -172,24 +172,24 @@ fn replace_and_restart(exe: &Path, zip: &Path) -> Result<(), String> {
     let new_bundle = unpack.join("DropCraft.app");
     if !ok || !new_bundle.exists() {
         let _ = std::fs::remove_dir_all(&unpack);
-        return Err("Update-Archiv konnte nicht entpackt werden".into());
+        return Err(crate::i18n::t("Could not unpack the update", "Update-Archiv konnte nicht entpackt werden").into());
     }
     let old = parent.join(".DropCraft.app.old");
     let _ = std::fs::remove_dir_all(&old);
-    std::fs::rename(&bundle, &old).map_err(|e| format!("App umbenennen: {e}"))?;
+    std::fs::rename(&bundle, &old).map_err(|e| tf!("Rename app: {e}", "App umbenennen: {e}"))?;
     if let Err(e) = std::fs::rename(&new_bundle, &bundle) {
         let _ = std::fs::rename(&old, &bundle);
-        return Err(format!("Update einsetzen: {e}"));
+        return Err(tf!("Install update: {e}", "Update einsetzen: {e}"));
     }
     let _ = std::fs::remove_dir_all(&unpack);
-    std::process::Command::new("open").arg("-n").arg(&bundle).args(["--args", "--after-update"]).spawn().map_err(|e| format!("Neustart: {e}"))?;
+    std::process::Command::new("open").arg("-n").arg(&bundle).args(["--args", "--after-update"]).spawn().map_err(|e| tf!("Restart: {e}", "Neustart: {e}"))?;
     std::process::exit(0);
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
 fn replace_and_restart(_exe: &Path, new: &Path) -> Result<(), String> {
     let _ = std::fs::remove_file(new);
-    Err("Updates aus der App gibt es nur unter Windows und macOS".into())
+    Err(crate::i18n::t("In-app updates are only available on Windows and macOS", "Updates aus der App gibt es nur unter Windows und macOS").into())
 }
 
 /// Reste eines früheren Updates entfernen.
@@ -237,7 +237,7 @@ pub fn spawn_checker(status: StatusRef, ctx: egui::Context, auto_install: impl F
                     }
                     run_install(&status, &ctx, &l);
                 } else if notified.as_deref() != Some(l.version.as_str()) {
-                    crate::notify::show("DropCraft-Update verfügbar", &format!("Version {} kann in den Einstellungen installiert werden.", l.version));
+                    crate::notify::show(crate::i18n::t("DropCraft update available", "DropCraft-Update verfügbar"), &tf!("Version {} can be installed in Settings.", "Version {} kann in den Einstellungen installiert werden.", l.version));
                     notified = Some(l.version.clone());
                 }
             }

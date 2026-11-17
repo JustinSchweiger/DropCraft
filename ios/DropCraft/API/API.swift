@@ -169,6 +169,15 @@ final class API {
         _ = try await send(try request("DELETE", "/shares/\(token)"))
     }
 
+    /// Einmal-Link zur Konto-Website auf dem Server, gleich angemeldet.
+    func webLoginURL(admin: Bool) async throws -> URL {
+        struct B: Encodable { let page: String }
+        struct R: Decodable { let url: String }
+        let data = try await send(try request("POST", "/account/web-login", json: B(page: admin ? "admin" : "")))
+        let r = try API.decoder.decode(R.self, from: data)
+        return URL(string: server + r.url) ?? base.appendingPathComponent("account")
+    }
+
     // MARK: Benutzerverwaltung (Admin)
 
     func users() async throws -> [UserInfo] { try await get("/admin/users") }

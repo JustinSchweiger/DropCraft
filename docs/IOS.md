@@ -1,7 +1,9 @@
 # iPhone and iPad app
 
 A native SwiftUI app in `ios/`: sign in (several accounts), browse folders, open files with
-preview, upload from Photos and Files, copy links, set share options, and manage users as admin.
+preview, upload from Photos and Files, copy links and set share options. *Konto verwalten* opens
+the account website of the server (password, devices, links; users and settings for admins). The
+iOS app is in German for now.
 
 ## Install with Xcode (free, an Apple ID is enough)
 

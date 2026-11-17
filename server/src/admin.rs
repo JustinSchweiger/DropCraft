@@ -60,7 +60,7 @@ pub async fn create_user(
     let quota = req
         .quota_gb
         .map(|g| (g * GB as f64) as i64)
-        .unwrap_or(state.cfg.default_quota_bytes);
+        .unwrap_or(crate::settings::load(&state).await.default_quota_bytes());
     if quota < 0 {
         return Err(ApiError::BadRequest("Quota darf nicht negativ sein".into()));
     }
@@ -92,16 +92,8 @@ pub async fn update_user(
         }
     }
     if let Some(pw) = req.password {
-        auth::validate_password(&pw)?;
-        sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
-            .bind(auth::hash_password(&pw)?)
-            .bind(id)
-            .execute(&state.db)
-            .await?;
-        sqlx::query("DELETE FROM sessions WHERE user_id = ?")
-            .bind(id)
-            .execute(&state.db)
-            .await?;
+        auth::validate_password(&pw, crate::settings::load(&state).await.min_password_len)?;
+        auth::set_password(&state, id, &pw, None).await?;
     }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -115,10 +107,18 @@ pub async fn delete_user(
     if id == user.id {
         return Err(ApiError::BadRequest("Du kannst dich nicht selbst löschen".into()));
     }
-    let r = sqlx::query("DELETE FROM users WHERE id = ?").bind(id).execute(&state.db).await?;
-    if r.rows_affected() == 0 {
+    if !remove_user(&state, id).await? {
         return Err(ApiError::NotFound);
     }
-    let _ = tokio::fs::remove_dir_all(state.user_dir(id)).await;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Löscht ein Konto samt Dateien. `false`, wenn es das Konto nicht gab.
+pub async fn remove_user(state: &AppState, id: i64) -> ApiResult<bool> {
+    let r = sqlx::query("DELETE FROM users WHERE id = ?").bind(id).execute(&state.db).await?;
+    if r.rows_affected() == 0 {
+        return Ok(false);
+    }
+    let _ = tokio::fs::remove_dir_all(state.user_dir(id)).await;
+    Ok(true)
 }

@@ -4,6 +4,7 @@
 pub mod api;
 pub mod bandwidth;
 pub mod hooks;
+pub mod lang;
 pub mod progress;
 pub mod state;
 pub mod sync;

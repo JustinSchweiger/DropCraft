@@ -153,8 +153,6 @@
     if (h.startsWith('/shares/')) return renderShare(h.slice(8));
     if (h === '/shares') return renderShares();
     if (h === '/account') return renderAccount();
-    if (h === '/users') return renderUsers();
-    if (h.startsWith('/users/')) return renderUser(Number(h.slice(7)));
     const dir = h.startsWith('/files') ? h.slice(7) : '';
     return renderFolder(dir);
   }
@@ -590,79 +588,26 @@ ${!standalone && ios ? `<div class="install">${ic('share', 18)}<span>Als App nut
 <div class="track"><div class="fill" id="qf"></div></div></div>
 <div class="label">Angemeldet</div>
 <div class="group"><div class="row"><span class="ic">${ic('user')}</span><span class="txt"><span class="name">${esc(me.username)}${me.is_admin ? ' · Admin' : ''}</span><span class="meta">${esc(location.host)}</span></span></div></div>
-${me.is_admin ? `<div class="label">Server</div><div class="group"><a class="row" href="#/users"><span class="ic">${ic('users')}</span><span class="txt">Benutzer verwalten</span><span class="chev">${ic('chev', 16)}</span></a></div>` : ''}
+<div class="label"></div>
+<div class="group"><button class="row" id="manage"><span class="ic">${ic(me.is_admin ? 'users' : 'user')}</span><span class="txt"><span class="name">${me.is_admin ? 'Konto & Verwaltung' : 'Konto verwalten'}</span><span class="meta">Passwort, Geräte, Links${me.is_admin ? ', Benutzer, Einstellungen' : ''}</span></span><span class="chev">${ic('chev', 16)}</span></button></div>
 <div class="label"></div>
 <div class="group"><button class="row danger" id="logout">${ic('logout')}Abmelden</button></div>`;
     const qf = main.querySelector('#qf');
     qf.style.width = Math.round(frac * 100) + '%';
     if (frac > 0.95) qf.classList.add('full');
+    // Konto-Website auf dem Server, gleich angemeldet (Einmal-Code).
+    main.querySelector('#manage').onclick = async () => {
+      try {
+        const r = await api('POST', '/account/web-login', { json: {} });
+        location.href = r.url;
+      } catch (e) { location.href = '/account'; }
+    };
     main.querySelector('#logout').onclick = async () => {
       if (!(await dialog({ title: 'Abmelden?', ok: 'Abmelden', danger: true }))) return;
       try { await api('POST', '/auth/logout'); } catch {}
       store.token = null;
       state.me = null;
       go('#/files');
-    };
-  }
-
-  async function renderUsers() {
-    const left = `<a class="iconbtn text" href="#/account" aria-label="Zurück">${ic('back', 20)}</a>`;
-    const right = `<button class="iconbtn" id="newuser" aria-label="Neuer Benutzer">${ic('plus', 22)}</button>`;
-    const main = shell('Benutzer', { left, right, tab: 'account', body: '<div class="spinner"></div>' });
-    document.getElementById('newuser').onclick = newUser;
-    let users;
-    try { users = await api('GET', '/admin/users'); } catch (e) { main.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
-    main.innerHTML = `<div class="group">${users
-      .map((u) =>
-        u.is_admin
-          ? `<div class="row"><span class="ic">${esc(u.username[0].toUpperCase())}</span><span class="txt"><span class="name">${esc(u.username)} · Admin</span><span class="meta">${size(u.used_bytes)} / ${size(u.quota_bytes)}</span></span></div>`
-          : `<a class="row" href="#/users/${u.id}"><span class="ic">${esc(u.username[0].toUpperCase())}</span><span class="txt"><span class="name">${esc(u.username)}</span><span class="meta">${size(u.used_bytes)} / ${size(u.quota_bytes)}</span></span><span class="chev">${ic('chev', 16)}</span></a>`
-      )
-      .join('')}</div>`;
-  }
-
-  async function newUser() {
-    const name = await dialog({ title: 'Neuer Benutzer', input: '', placeholder: 'Name (mind. 3 Zeichen)', ok: 'Weiter' });
-    if (!name) return;
-    const pw = await dialog({ title: 'Passwort', input: '', type: 'password', placeholder: 'mind. 10 Zeichen', ok: 'Weiter' });
-    if (!pw) return;
-    if (pw.length < 10) return toast('Das Passwort braucht mindestens 10 Zeichen');
-    const gb = await dialog({ title: 'Speicher in GB', input: '50', type: 'number', ok: 'Anlegen' });
-    const q = parseFloat(String(gb || '').replace(',', '.'));
-    if (!(q > 0)) return;
-    try {
-      await api('POST', '/admin/users', { json: { username: name, password: pw, quota_gb: q, is_admin: false } });
-      toast(`„${name}“ angelegt`);
-      route();
-    } catch (e) { fail(e); }
-  }
-
-  async function renderUser(id) {
-    const left = `<a class="iconbtn text" href="#/users" aria-label="Zurück">${ic('back', 20)}</a>`;
-    const main = shell('Benutzer', { left, tab: 'account', body: '<div class="spinner"></div>' });
-    let u;
-    try { u = (await api('GET', '/admin/users')).find((x) => x.id === id); } catch (e) { return fail(e); }
-    if (!u) { main.innerHTML = '<div class="empty">Nicht gefunden.</div>'; return; }
-    document.querySelector('.bar h1').textContent = u.username;
-    const gbNow = +(u.quota_bytes / 1073741824).toFixed(2);
-    main.innerHTML = `<form id="uf"><div class="group">
-<div class="field"><label for="gb">Speicher (GB) · belegt ${size(u.used_bytes)}</label><input class="input" id="gb" inputmode="decimal" value="${gbNow}"></div>
-<div class="field"><label for="pw">Neues Passwort</label><input class="input" id="pw" type="password" placeholder="leer = unverändert" autocomplete="new-password"></div>
-</div><div class="label"></div><button class="btn primary block">Speichern</button></form>
-<div class="label"></div><div class="group"><button class="row danger" id="udel">Benutzer löschen</button></div>`;
-    main.querySelector('#uf').onsubmit = async (e) => {
-      e.preventDefault();
-      const q = parseFloat(main.querySelector('#gb').value.replace(',', '.'));
-      const pw = main.querySelector('#pw').value;
-      if (!(q > 0)) return toast('Ungültige Größe');
-      if (pw && pw.length < 10) return toast('Das Passwort braucht mindestens 10 Zeichen');
-      const body = { quota_gb: q };
-      if (pw) body.password = pw;
-      try { await api('PATCH', '/admin/users/' + id, { json: body }); toast('Gespeichert'); go('#/users'); } catch (err) { fail(err); }
-    };
-    main.querySelector('#udel').onclick = async () => {
-      if (!(await dialog({ title: `„${u.username}“ löschen?`, text: 'Löscht auch alle Dateien des Benutzers.', ok: 'Löschen', danger: true }))) return;
-      try { await api('DELETE', '/admin/users/' + id); toast('Gelöscht'); go('#/users'); } catch (e) { fail(e); }
     };
   }
 

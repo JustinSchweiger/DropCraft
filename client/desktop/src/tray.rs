@@ -262,6 +262,9 @@ pub struct TrayStatus {
     pub state: TrayState,
     pub tooltip: String,
     pub pause_label: &'static str,
+    /// „DropCraft öffnen“ / „Beenden“ in der aktuellen Sprache.
+    pub open_label: &'static str,
+    pub quit_label: &'static str,
 }
 
 /// Taskleisten-Symbol: Logo plus Abzeichen unten rechts. Beim Synchronisieren
@@ -324,9 +327,9 @@ pub fn spawn(
     on_quit: impl Fn() + Send + Sync + 'static,
 ) {
     let _ = std::thread::Builder::new().name("tray".into()).spawn(move || {
-        let open = MenuItem::new("DropCraft öffnen", true, None);
-        let pause = MenuItem::new("Pausieren", true, None);
-        let quit = MenuItem::new("Beenden", true, None);
+        let open = MenuItem::new(crate::i18n::t("Open DropCraft", "DropCraft öffnen"), true, None);
+        let pause = MenuItem::new(crate::i18n::t("Pause", "Pausieren"), true, None);
+        let quit = MenuItem::new(crate::i18n::t("Quit", "Beenden"), true, None);
         let menu = Menu::new();
         if menu.append_items(&[&open, &pause, &PredefinedMenuItem::separator(), &quit]).is_err() {
             return;
@@ -353,6 +356,7 @@ pub fn spawn(
         let mut frame = 0u32;
         let mut tooltip = String::new();
         let mut pause_label = "";
+        let mut open_label = "";
         let mut last = Instant::now() - Duration::from_secs(1);
         loop {
             pump_messages(100);
@@ -379,13 +383,18 @@ pub fn spawn(
                 pause.set_text(st.pause_label);
                 pause_label = st.pause_label;
             }
+            if st.open_label != open_label {
+                open.set_text(st.open_label);
+                quit.set_text(st.quit_label);
+                open_label = st.open_label;
+            }
         }
     });
 }
 
 #[cfg(target_os = "macos")]
 thread_local! {
-    static MAC_TRAY: std::cell::RefCell<Option<(tray_icon::TrayIcon, MenuItem)>> = const { std::cell::RefCell::new(None) };
+    static MAC_TRAY: std::cell::RefCell<Option<(tray_icon::TrayIcon, MenuItem, MenuItem, MenuItem)>> = const { std::cell::RefCell::new(None) };
 }
 
 /// macOS: Das Menüleisten-Symbol muss auf dem Hauptthread entstehen (hier:
@@ -399,9 +408,9 @@ pub fn spawn(
     on_pause: impl Fn() + Send + Sync + 'static,
     on_quit: impl Fn() + Send + Sync + 'static,
 ) {
-    let open = MenuItem::new("DropCraft öffnen", true, None);
-    let pause = MenuItem::new("Pausieren", true, None);
-    let quit = MenuItem::new("Beenden", true, None);
+    let open = MenuItem::new(crate::i18n::t("Open DropCraft", "DropCraft öffnen"), true, None);
+    let pause = MenuItem::new(crate::i18n::t("Pause", "Pausieren"), true, None);
+    let quit = MenuItem::new(crate::i18n::t("Quit", "Beenden"), true, None);
     let menu = Menu::new();
     if menu.append_items(&[&open, &pause, &PredefinedMenuItem::separator(), &quit]).is_err() {
         return;
@@ -418,13 +427,14 @@ pub fn spawn(
     else {
         return;
     };
-    MAC_TRAY.with(|t| *t.borrow_mut() = Some((tray, pause)));
+    MAC_TRAY.with(|t| *t.borrow_mut() = Some((tray, pause, open, quit)));
 
     let _ = std::thread::Builder::new().name("tray".into()).spawn(move || {
         let mut shown = (TrayState::Idle, 0u32);
         let mut frame = 0u32;
         let mut tooltip = String::new();
         let mut pause_label = "";
+        let mut open_label = "";
         loop {
             std::thread::sleep(Duration::from_millis(125));
             let st = status();
@@ -440,12 +450,14 @@ pub fn spawn(
             tooltip = st.tooltip;
             let new_label = (st.pause_label != pause_label).then_some(st.pause_label);
             pause_label = st.pause_label;
-            if new_icon.is_none() && new_tip.is_none() && new_label.is_none() {
+            let new_texts = (st.open_label != open_label).then_some((st.open_label, st.quit_label));
+            open_label = st.open_label;
+            if new_icon.is_none() && new_tip.is_none() && new_label.is_none() && new_texts.is_none() {
                 continue;
             }
             dispatch::Queue::main().exec_async(move || {
                 MAC_TRAY.with(|t| {
-                    if let Some((tray, pause)) = &*t.borrow() {
+                    if let Some((tray, pause, open, quit)) = &*t.borrow() {
                         if let Some(px) = new_icon {
                             let _ = tray.set_icon(tray_icon::Icon::from_rgba(px, 32, 32).ok());
                         }
@@ -454,6 +466,10 @@ pub fn spawn(
                         }
                         if let Some(l) = new_label {
                             pause.set_text(l);
+                        }
+                        if let Some((o, q)) = new_texts {
+                            open.set_text(o);
+                            quit.set_text(q);
                         }
                     }
                 });
