@@ -1017,6 +1017,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dropcraft-shell"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "windows",
+ "windows-core",
+]
+
+[[package]]
 name = "ecolor"
 version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

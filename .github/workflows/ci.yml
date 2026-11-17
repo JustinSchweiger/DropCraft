@@ -142,7 +142,7 @@ jobs:
           MSG=$(git log -1 --pretty=%s)
           NOTES="Automatisch gebaut aus \`$(git rev-parse --short HEAD)\` am $(date -u +'%d.%m.%Y %H:%M') UTC: $MSG
 
-          - **DropCraft-Windows.exe**: Windows-App mit Dateien bei Bedarf (empfohlen)
+          - **DropCraft-Windows.exe**: Windows-App mit Dateien bei Bedarf (empfohlen, installiert sich beim ersten Start)
           - **DropCraft-Windows-ohne-Cloud-Dateien.exe**: lädt immer alle Dateien
           - **DropCraft-macOS.zip**: Mac-App (beim ersten Start Rechtsklick → Öffnen)
           - **DropCraft-iOS.ipa**: unsigniert, für SideStore/AltStore/Sideloadly

@@ -337,6 +337,10 @@ impl App {
                     let mut line = String::new();
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                     let _ = std::io::Read::read_to_string(&mut stream, &mut line);
+                    // Installer/Deinstallation: laufende Instanz beenden.
+                    if line.trim_end() == "QUIT" {
+                        std::process::exit(0);
+                    }
                     if let Some(p) = line.trim_end().strip_prefix("SHARE ") {
                         reqs.lock().unwrap().push(PathBuf::from(p));
                     }
@@ -352,6 +356,11 @@ impl App {
             tray::spawn(move || c1.tray_status(), win.clone(), ctx.clone(), move || c2.toggle_all(), || std::process::exit(0));
         }
         config::register_context_menu(&cfg.accounts);
+        // Run-Eintrag auf diese Programmdatei setzen (sie kann seit dem letzten
+        // Start verschoben oder installiert worden sein).
+        if cfg.autostart && !cfg.accounts.is_empty() {
+            config::set_autostart(true);
+        }
 
         let update = crate::updater::StatusRef::default();
         {
@@ -469,8 +478,8 @@ impl App {
             if form.first {
                 ui.horizontal(|ui| {
                     let (rect, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
-                    ui.painter().rect_filled(rect, 8.0, BG);
-                    paint_cube(ui.painter(), rect.shrink(9.0), ACCENT);
+                    let logo = logo_texture(ui.ctx());
+                    ui.painter().image(logo.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
                     ui.vertical(|ui| {
                         ui.label(RichText::new("Willkommen bei DropCraft").size(17.0));
                         ui.label(RichText::new("Dein eigener Cloud-Speicher").color(TEXT_DIM));
@@ -1104,6 +1113,20 @@ impl App {
                 std::thread::spawn(|| crate::notify::show("DropCraft", "So sehen Benachrichtigungen aus."));
             }
         });
+        // Windows 11: Eintrag „DropCraft“ direkt im Rechtsklick-Menü des Explorers.
+        #[cfg(windows)]
+        if crate::shellmenu::supported() && crate::installer::is_installed_copy() {
+            let ready = crate::shellmenu::is_set_up();
+            let sub = if ready { "eingerichtet" } else { "einmalige Admin-Bestätigung" };
+            setting_row(ui, "Explorer-Menü", Some(sub), |ui| {
+                let label = if ready { "Neu einrichten" } else { "Einrichten" };
+                if ui.link(RichText::new(label).color(ACCENT)).clicked() {
+                    if let Ok(exe) = std::env::current_exe() {
+                        let _ = std::process::Command::new(exe).arg("--setup-explorer-menu").spawn();
+                    }
+                }
+            });
+        }
         if crate::updater::SUPPORTED {
             section_label(ui, "Updates", None);
             let mut au = self.cfg.auto_update;
@@ -1763,7 +1786,7 @@ fn shares_delete(view: &mut SharesView, acc: &Account, ctx: &egui::Context, toke
 }
 
 /// Lokaler Pfad im Sync-Ordner -> Server-Pfad. None, wenn außerhalb.
-fn remote_path(sync_dir: &std::path::Path, p: &std::path::Path) -> Option<String> {
+pub(crate) fn remote_path(sync_dir: &std::path::Path, p: &std::path::Path) -> Option<String> {
     let rel: PathBuf = match p.strip_prefix(sync_dir) {
         Ok(r) => r.to_path_buf(),
         // Unter Windows Groß-/Kleinschreibung ignorieren.
@@ -1786,11 +1809,11 @@ fn remote_path(sync_dir: &std::path::Path, p: &std::path::Path) -> Option<String
     (!r.is_empty()).then_some(r)
 }
 
-fn copy_to_clipboard(text: &str) -> bool {
+pub(crate) fn copy_to_clipboard(text: &str) -> bool {
     arboard::Clipboard::new().and_then(|mut c| c.set_text(text.to_string())).is_ok()
 }
 
-fn open_url(url: &str) {
+pub(crate) fn open_url(url: &str) {
     #[cfg(windows)]
     let _ = std::process::Command::new("explorer").arg(url).spawn();
     #[cfg(target_os = "macos")]
@@ -2168,17 +2191,17 @@ fn paint_icon_at(p: &egui::Painter, r: Rect, icon: Icon, color: Color32) {
     }
 }
 
-/// Das Würfel-Logo, als Linien gezeichnet.
-fn paint_cube(p: &egui::Painter, r: Rect, color: Color32) {
-    let s = Stroke::new(1.6, color);
-    let c = r.center();
-    let h = r.height() * 0.46;
-    let w = h * 0.866;
-    let pt = |x: f32, y: f32| Pos2::new(c.x + x, c.y + y);
-    let (top, ul, ur, mid, ll, lr, bot) = (pt(0.0, -h), pt(-w, -h / 2.0), pt(w, -h / 2.0), pt(0.0, 0.0), pt(-w, h / 2.0), pt(w, h / 2.0), pt(0.0, h));
-    p.add(egui::Shape::closed_line(vec![top, ur, lr, bot, ll, ul], s));
-    p.line(vec![ul, mid, ur], s);
-    p.line_segment([mid, bot], s);
+/// Das App-Logo als Textur (einmal gezeichnet, dann aus dem Speicher).
+fn logo_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    let id = egui::Id::unique("dropcraft-logo");
+    if let Some(t) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        return t;
+    }
+    let n = 128;
+    let img = egui::ColorImage::from_rgba_unmultiplied([n, n], &crate::icons::logo_rgba(n as u32));
+    let t = ctx.load_texture("dropcraft-logo", img, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|d| d.insert_temp(id, t.clone()));
+    t
 }
 
 #[cfg(test)]

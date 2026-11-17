@@ -65,7 +65,7 @@ pub fn summary(added: usize, removed: usize, who: &[String]) -> String {
 /// Eigene App-ID, damit Meldungen als „DropCraft“ (mit Symbol) erscheinen und
 /// nicht unter „PowerShell“, das bei vielen abgeschaltet ist.
 #[cfg(windows)]
-const APP_ID: &str = "DropCraft.App";
+pub const APP_ID: &str = "DropCraft.App";
 
 /// Letzter Fehler beim Anzeigen (für „Test senden“ in den Einstellungen).
 static LAST_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
@@ -100,10 +100,12 @@ pub fn init() {
 #[cfg(windows)]
 fn register_app_id() {
     use winreg::{enums::HKEY_CURRENT_USER, RegKey};
-    let icon = crate::config::app_dir().join("dropcraft.ico");
+    let rev = crate::icons::LOGO_REV;
+    let icon = crate::config::app_dir().join(format!("dropcraft-{rev}.ico"));
     if !icon.exists() {
         let _ = std::fs::create_dir_all(crate::config::app_dir());
         let _ = std::fs::write(&icon, crate::icons::ico_bytes(&[16, 32, 48, 256], crate::icons::logo_rgba));
+        let _ = std::fs::remove_file(crate::config::app_dir().join("dropcraft.ico"));
     }
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     if let Ok((key, _)) = hkcu.create_subkey(format!("Software\\Classes\\AppUserModelId\\{APP_ID}")) {

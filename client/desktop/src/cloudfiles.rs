@@ -22,7 +22,7 @@ use cloud_filter::{
 use dropcraft_core::{progress, Api, LocalHooks, ProgressRef, RemoteEntry};
 use nt_time::FileTime;
 
-use crate::{config, worker::Cmd};
+use crate::worker::Cmd;
 
 const ATTR_REPARSE_POINT: u32 = 0x0000_0400;
 const ATTR_PINNED: u32 = 0x0008_0000;
@@ -379,7 +379,7 @@ pub fn connect(
     // Immer neu registrieren: aktualisiert Name und Symbol einer bestehenden
     // Registrierung, Platzhalter bleiben erhalten.
     {
-        let icon = config::app_dir().join("folder.ico");
+        let icon = crate::folder_icon::ico_path();
         let info = SyncRootInfo::default()
             .with_display_name(format!("DropCraft – {label}"))
             .with_hydration_type(HydrationType::Full)
@@ -431,6 +431,19 @@ pub fn unregister(account_id: &str, root: &Path) {
     }
     if let Ok(id) = root_id(account_id) {
         let _ = id.unregister();
+    }
+}
+
+/// Meldet alle DropCraft-Sync-Ordner dieses Benutzers ab (Deinstallation).
+/// Ohne laufende App können Platzhalter nicht mehr geladen werden.
+pub fn unregister_all() {
+    if let Ok(roots) = cloud_filter::root::active_roots() {
+        for r in roots {
+            let id = r.id();
+            if id.to_os_string().to_string_lossy().starts_with("DropCraft!") {
+                let _ = id.unregister();
+            }
+        }
     }
 }
 

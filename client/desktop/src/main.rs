@@ -1,6 +1,7 @@
 // Unter Windows ohne Konsolenfenster starten.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod actions;
 mod app;
 #[cfg(all(windows, feature = "cloud-files"))]
 mod cloudfiles;
@@ -8,7 +9,10 @@ mod config;
 mod folder_icon;
 #[allow(dead_code)]
 mod icons;
+mod installer;
 mod notify;
+#[cfg(windows)]
+mod shellmenu;
 mod theme;
 mod tray;
 mod updater;
@@ -21,7 +25,7 @@ use std::{
 
 /// Lokaler Port als „nur eine Instanz“-Sperre. Ein zweiter Start meldet sich
 /// dort und holt damit das laufende Fenster nach vorne.
-const INSTANCE_PORT: u16 = 47819;
+pub(crate) const INSTANCE_PORT: u16 = 47819;
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
@@ -32,7 +36,37 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
-    let autostart = args.iter().any(|a| a == "--autostart");
+    // Für Web-App und iOS: `DropCraft --export-png <Datei> <Größe> [--full-bleed]`
+    if let Some(i) = args.iter().position(|a| a == "--export-png") {
+        let (Some(path), Some(size)) = (args.get(i + 1), args.get(i + 2).and_then(|s| s.parse::<u32>().ok())) else {
+            eprintln!("--export-png <Datei> <Größe> [--full-bleed]");
+            return Ok(());
+        };
+        let rgba = if args.iter().any(|a| a == "--full-bleed") { icons::logo_full_bleed_rgba(size) } else { icons::logo_rgba(size) };
+        if let Err(e) = std::fs::write(path, icons::png_bytes(&rgba, size)) {
+            eprintln!("{e}");
+        }
+        return Ok(());
+    }
+    // Aus dem Explorer-Menü: ohne Fenster erledigen und beenden.
+    if let Some(i) = args.iter().position(|a| a == "--copy-link" || a == "--open-web") {
+        if let Some(p) = args.get(i + 1) {
+            notify::init();
+            if args[i] == "--copy-link" {
+                actions::copy_link(std::path::Path::new(p));
+            } else {
+                actions::open_web(std::path::Path::new(p));
+            }
+        }
+        return Ok(());
+    }
+    // Installieren/Deinstallieren (Windows); fragt beim Start aus „Downloads“ o. Ä.
+    if let installer::Next::Exit = installer::handle_args(&args) {
+        return Ok(());
+    }
+    // Beim Windows-Start und nach einem (meist automatischen) Update nur ins
+    // Tray, ohne Popup.
+    let autostart = args.iter().any(|a| a == "--autostart" || a == "--after-update");
     let share = args.iter().position(|a| a == "--share").and_then(|i| args.get(i + 1)).map(std::path::PathBuf::from);
     // Nach einem Update: warten, bis die alte Instanz beendet ist.
     if args.iter().any(|a| a == "--after-update") {
@@ -47,6 +81,7 @@ fn main() -> eframe::Result {
         }
     }
     updater::cleanup();
+    installer::on_start();
     notify::init();
     let listener = match TcpListener::bind(("127.0.0.1", INSTANCE_PORT)) {
         Ok(l) => l,

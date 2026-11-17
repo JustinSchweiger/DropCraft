@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::icons::{disc, line, logo_rgba};
+use crate::icons::{disc, line, logo_simple_rgba};
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
     MouseButton, TrayIconBuilder, TrayIconEvent,
@@ -268,7 +268,7 @@ pub struct TrayStatus {
 /// dreht sich ein Pfeil im Abzeichen (`frame` 0..8).
 pub fn tray_rgba(state: TrayState, frame: u32) -> Vec<u8> {
     let size = 32u32;
-    let mut px = logo_rgba(size);
+    let mut px = logo_simple_rgba(size);
     let s = size as f32;
     let c = (s * 0.74, s * 0.74);
     let r = s * 0.25;

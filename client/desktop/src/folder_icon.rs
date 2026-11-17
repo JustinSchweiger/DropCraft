@@ -1,20 +1,31 @@
-//! Eigenes Ordnersymbol für den Sync-Ordner im Explorer:
-//! ein cyanfarbener Ordner mit dem DropCraft-Würfel.
+//! Eigenes Ordnersymbol für den Sync-Ordner im Explorer: das App-Logo.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::{
     config,
-    icons::{folder_rgba, ico_bytes},
+    icons::{ico_bytes, logo_rgba, LOGO_REV},
 };
+
+/// Pfad der .ico für Sync-Ordner (auch für die Cloud-Ordner-Anmeldung);
+/// legt sie bei Bedarf an. Der Name enthält die Logo-Version, damit Windows
+/// nach einem neuen Logo nicht das alte aus dem Symbol-Cache zeigt.
+pub fn ico_path() -> PathBuf {
+    let ico = config::app_dir().join(format!("folder-{LOGO_REV}.ico"));
+    if !ico.exists() {
+        let _ = std::fs::create_dir_all(config::app_dir());
+        let _ = std::fs::write(&ico, ico_bytes(&[16, 20, 24, 32, 40, 48, 64, 256], logo_rgba));
+        let _ = std::fs::remove_file(config::app_dir().join("folder.ico"));
+        for rev in 2..LOGO_REV {
+            let _ = std::fs::remove_file(config::app_dir().join(format!("folder-{rev}.ico")));
+        }
+    }
+    ico
+}
 
 /// Schreibt das Symbol und setzt es für den Ordner (nur Windows).
 pub fn apply(dir: &Path) {
-    let ico = config::app_dir().join("folder.ico");
-    if !ico.exists() {
-        let _ = std::fs::create_dir_all(config::app_dir());
-        let _ = std::fs::write(&ico, ico_bytes(&[16, 24, 32, 48, 64, 256], folder_rgba));
-    }
+    let ico = ico_path();
     #[cfg(windows)]
     apply_windows(dir, &ico);
     #[cfg(target_os = "macos")]
@@ -29,7 +40,7 @@ fn apply_macos(dir: &Path) {
     use objc2::AllocAnyThread;
     use objc2_app_kit::{NSImage, NSWorkspace, NSWorkspaceIconCreationOptions};
     use objc2_foundation::{NSData, NSString};
-    let png = crate::icons::png_bytes(&folder_rgba(512), 512);
+    let png = crate::icons::png_bytes(&logo_rgba(512), 512);
     let data = NSData::with_bytes(&png);
     let Some(img) = NSImage::initWithData(NSImage::alloc(), &data) else { return };
     let path = NSString::from_str(&dir.display().to_string());
@@ -91,7 +102,7 @@ fn apply_windows(dir: &Path, ico: &Path) {
 mod tests {
     #[test]
     fn writes_ico_for_inspection() {
-        let bytes = crate::icons::ico_bytes(&[16, 32, 48, 256], crate::icons::folder_rgba);
+        let bytes = crate::icons::ico_bytes(&[16, 32, 48, 256], crate::icons::logo_rgba);
         assert_eq!(&bytes[..4], &[0, 0, 1, 0]);
         std::fs::write(std::env::temp_dir().join("dropcraft-folder.ico"), bytes).unwrap();
     }

@@ -1,5 +1,5 @@
 // Hält die App-Hülle offline bereit. API und Downloads gehen immer ins Netz.
-const CACHE = 'dropcraft-app-v1';
+const CACHE = 'dropcraft-app-v2';
 const SHELL = ['/app/', '/app/app.js', '/app/app.css', '/app/manifest.webmanifest', '/app/icon-180.png', '/app/icon-192.png'];
 
 self.addEventListener('install', (e) => {
