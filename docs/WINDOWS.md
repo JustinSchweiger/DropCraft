@@ -9,6 +9,10 @@
   close it. Right-click the icon for *Open*, *Pause* and *Quit*.
 - **Starts silently.** With *Start with Windows* on, DropCraft starts in the tray at sign-in
   and after updates, without showing the popup.
+- **Notifications.** The bell at the top right of the popup collects messages (changes in shared
+  folders, copied links, available updates). A number on the bell and a red dot on the tray icon
+  mean unread ones; opening the list marks them read, and each one (or all) can be cleared. They
+  are kept in `%APPDATA%\DropCraft\notifications.json`.
 - **Live statistics.** The current file with progress, speed, files and size left, time left, queue.
 - **Tray icon.** Spins while syncing; grey = paused, yellow = needs attention. The tooltip shows
   what is left.
@@ -31,7 +35,7 @@ Right-click a file or folder in a sync folder › **DropCraft** › *Copy DropCr
 *Alles als ZIP*, no DropCraft needed. Photos and videos show as a gallery with preview.
 
 Per link you can allow uploads by guests, set a password and an expiry date, and turn on
-notifications (a Windows notification when others add or delete files there). Links can be ended
+notifications (a message under the bell when others add or delete files there). Links can be ended
 from the same place.
 
 ## Explorer menu
@@ -40,7 +44,7 @@ On Windows 11, right-click any file or folder in a sync folder (or the empty spa
 
 | Entry | What it does |
 |---|---|
-| **Copy DropCraft link** | Creates the link (or reuses the existing one), copies it and confirms with a notification. No window opens |
+| **Copy DropCraft link** | Creates the link (or reuses the existing one), copies it and confirms under the bell. No window opens |
 | **Share …** | Opens the popup on this link with all its options |
 | **View in browser** | Opens the web app in this folder (for a file: the folder it is in) |
 
@@ -61,7 +65,8 @@ Newer Windows 11 versions group app entries under **App-Erweiterungen / App exte
 *Settings › Personalization › Context menu* you choose whether DropCraft appears there or directly
 in the main menu.
 
-**Troubleshooting:** create an empty file `%APPDATA%\DropCraft\shell-debug`, right-click again and
+**Troubleshooting:** `%APPDATA%\DropCraft\app.log` records every start (with its arguments) and
+why the popup was shown. For the Explorer menu, create an empty file `%APPDATA%\DropCraft\shell-debug`, right-click again and
 read `%TEMP%\DropCraftShell.log`: it lists every call Explorer makes to the menu. Delete the file
 afterwards. Uninstalling
 DropCraft removes the package; the trusted certificate stays but is useless without its key.

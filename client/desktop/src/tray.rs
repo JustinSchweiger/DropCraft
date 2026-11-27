@@ -57,6 +57,28 @@ impl WindowHandle {
         self.visible.load(Ordering::SeqCst)
     }
 
+    /// Handle nachtragen, falls `set_from` beim Start keins bekam.
+    pub fn ensure_handle<W: raw_window_handle::HasWindowHandle>(&self, w: &W) {
+        if self.hwnd.load(Ordering::SeqCst) == 0 {
+            self.set_from(w);
+            if self.hwnd.load(Ordering::SeqCst) != 0 {
+                crate::applog::line("Fenster-Handle nachträglich übernommen");
+            }
+        }
+    }
+
+    /// Sichtbar, obwohl die App es versteckt hält? (nur Windows)
+    pub fn shown_without_us(&self) -> bool {
+        #[cfg(windows)]
+        {
+            let hwnd = self.hwnd.load(Ordering::SeqCst);
+            if hwnd != 0 && !self.is_visible() {
+                return unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd as _) } != 0;
+            }
+        }
+        false
+    }
+
     /// Wurde das Popup gerade erst durch Wegklicken geschlossen? Dann soll
     /// der Klick aufs Tray-Symbol es nicht sofort wieder öffnen.
     fn hidden_just_now(&self) -> bool {
@@ -98,6 +120,7 @@ impl WindowHandle {
             }
         }
         let _ = anchor;
+        crate::applog::line("Popup ohne Fenster-Handle gezeigt (Bildschirmmitte)");
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         ctx.request_repaint();
@@ -265,11 +288,25 @@ pub struct TrayStatus {
     /// „DropCraft öffnen“ / „Beenden“ in der aktuellen Sprache.
     pub open_label: &'static str,
     pub quit_label: &'static str,
+    /// Ungelesene Benachrichtigungen: roter Punkt am Symbol
+    pub unread: bool,
 }
 
 /// Taskleisten-Symbol: Logo plus Abzeichen unten rechts. Beim Synchronisieren
-/// dreht sich ein Pfeil im Abzeichen (`frame` 0..8).
-pub fn tray_rgba(state: TrayState, frame: u32) -> Vec<u8> {
+/// dreht sich ein Pfeil im Abzeichen (`frame` 0..8). Ungelesene
+/// Benachrichtigungen: roter Punkt oben rechts.
+pub fn tray_rgba(state: TrayState, frame: u32, unread: bool) -> Vec<u8> {
+    let mut px = tray_base(state, frame);
+    if unread {
+        let s = 32.0f32;
+        let c = (s * 0.80, s * 0.20);
+        disc(&mut px, 32, c, s * 0.20 + 1.5, [0x0b, 0x0e, 0x12, 0xff]);
+        disc(&mut px, 32, c, s * 0.20, [0xef, 0x44, 0x55, 0xff]);
+    }
+    px
+}
+
+fn tray_base(state: TrayState, frame: u32) -> Vec<u8> {
     let size = 32u32;
     let mut px = logo_simple_rgba(size);
     let s = size as f32;
@@ -337,10 +374,10 @@ pub fn spawn(
         let ids = TrayIds { open: open.id().clone(), pause: pause.id().clone(), quit: quit.id().clone() };
         install_handlers(ids, win, ctx, on_pause, on_quit);
 
-        let icon = |st: TrayState, f: u32| tray_icon::Icon::from_rgba(tray_rgba(st, f), 32, 32).ok();
+        let icon = |st: TrayState, f: u32, unread: bool| tray_icon::Icon::from_rgba(tray_rgba(st, f, unread), 32, 32).ok();
         let Some(tray) = TrayIconBuilder::new()
             .with_tooltip("DropCraft")
-            .with_icon(match icon(TrayState::Idle, 0) {
+            .with_icon(match icon(TrayState::Idle, 0, false) {
                 Some(i) => i,
                 None => return,
             })
@@ -352,7 +389,7 @@ pub fn spawn(
             return;
         };
 
-        let mut shown = (TrayState::Idle, 0u32);
+        let mut shown = (TrayState::Idle, 0u32, false);
         let mut frame = 0u32;
         let mut tooltip = String::new();
         let mut pause_label = "";
@@ -371,9 +408,9 @@ pub fn spawn(
             } else {
                 0
             };
-            if (st.state, f) != shown {
-                let _ = tray.set_icon(icon(st.state, f));
-                shown = (st.state, f);
+            if (st.state, f, st.unread) != shown {
+                let _ = tray.set_icon(icon(st.state, f, st.unread));
+                shown = (st.state, f, st.unread);
             }
             if st.tooltip != tooltip {
                 let _ = tray.set_tooltip(Some(&st.tooltip));
@@ -417,7 +454,7 @@ pub fn spawn(
     }
     let ids = TrayIds { open: open.id().clone(), pause: pause.id().clone(), quit: quit.id().clone() };
     install_handlers(ids, win, ctx, on_pause, on_quit);
-    let Some(icon) = tray_icon::Icon::from_rgba(tray_rgba(TrayState::Idle, 0), 32, 32).ok() else { return };
+    let Some(icon) = tray_icon::Icon::from_rgba(tray_rgba(TrayState::Idle, 0, false), 32, 32).ok() else { return };
     let Ok(tray) = TrayIconBuilder::new()
         .with_tooltip("DropCraft")
         .with_icon(icon)
@@ -430,7 +467,7 @@ pub fn spawn(
     MAC_TRAY.with(|t| *t.borrow_mut() = Some((tray, pause, open, quit)));
 
     let _ = std::thread::Builder::new().name("tray".into()).spawn(move || {
-        let mut shown = (TrayState::Idle, 0u32);
+        let mut shown = (TrayState::Idle, 0u32, false);
         let mut frame = 0u32;
         let mut tooltip = String::new();
         let mut pause_label = "";
@@ -444,8 +481,8 @@ pub fn spawn(
             } else {
                 0
             };
-            let new_icon = ((st.state, f) != shown).then(|| tray_rgba(st.state, f));
-            shown = (st.state, f);
+            let new_icon = ((st.state, f, st.unread) != shown).then(|| tray_rgba(st.state, f, st.unread));
+            shown = (st.state, f, st.unread);
             let new_tip = (st.tooltip != tooltip).then(|| st.tooltip.clone());
             tooltip = st.tooltip;
             let new_label = (st.pause_label != pause_label).then_some(st.pause_label);
@@ -501,6 +538,7 @@ fn install_handlers(
     }));
     MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
         if e.id == ids.open {
+            crate::applog::line("Popup zeigen: Tray-Menü „Öffnen“");
             win.show(&ctx, None);
         } else if e.id == ids.pause {
             on_pause();
@@ -556,9 +594,12 @@ mod tests {
     fn tray_icons_render() {
         for st in [TrayState::Idle, TrayState::Syncing, TrayState::Paused, TrayState::Problem] {
             for f in 0..8 {
-                let px = tray_rgba(st, f);
+                let px = tray_rgba(st, f, false);
                 assert_eq!(px.len(), 32 * 32 * 4);
-                let _ = std::fs::write(std::env::temp_dir().join(format!("tray-{st:?}-{f}.rgba")), &px);
+                // Ungelesen: oben rechts ein roter Punkt
+                let red = tray_rgba(st, f, true);
+                let i = ((6 * 32 + 26) * 4) as usize;
+                assert_eq!(&red[i..i + 3], &[0xef, 0x44, 0x55]);
             }
         }
     }

@@ -1,4 +1,6 @@
-//! Windows-Benachrichtigungen bei Änderungen in freigegebenen Ordnern.
+//! Benachrichtigungen: Änderungen in freigegebenen Ordnern zusammenfassen und
+//! in die Liste der App legen (siehe `inbox`). Außerdem die App-ID und die
+//! Startmenü-Verknüpfung unter Windows.
 
 use std::collections::BTreeMap;
 
@@ -62,21 +64,13 @@ pub fn summary(added: usize, removed: usize, who: &[String]) -> String {
     s
 }
 
-/// Eigene App-ID, damit Meldungen als „DropCraft“ (mit Symbol) erscheinen und
-/// nicht unter „PowerShell“, das bei vielen abgeschaltet ist.
+/// Eigene App-ID: Taskleiste und Startmenü ordnen Fenster und Verknüpfung
+/// damit „DropCraft“ zu.
 #[cfg(windows)]
 pub const APP_ID: &str = "DropCraft.App";
 
-/// Letzter Fehler beim Anzeigen (für „Test senden“ in den Einstellungen).
-static LAST_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-
-pub fn last_error() -> Option<String> {
-    LAST_ERROR.lock().unwrap().clone()
-}
-
-/// Beim Start aufrufen: App-ID setzen und bei Windows bekannt machen
-/// (Registry-Eintrag und Startmenü-Verknüpfung mit derselben ID – ohne
-/// beides verwirft Windows Meldungen von nicht installierten Programmen).
+/// Beim Start aufrufen: App-ID setzen, bei Windows bekannt machen und die
+/// Startmenü-Verknüpfung anlegen.
 pub fn init() {
     #[cfg(windows)]
     {
@@ -87,13 +81,9 @@ pub fn init() {
         std::thread::spawn(|| {
             register_app_id();
             if let Err(e) = ensure_shortcut() {
-                *LAST_ERROR.lock().unwrap() = Some(tf!("Start menu shortcut: {e}", "Startmenü-Verknüpfung: {e}"));
+                crate::applog::line(&format!("Startmenü-Verknüpfung: {e}"));
             }
         });
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = notify_rust::set_application("tech.dropcraft.app");
     }
 }
 
@@ -165,23 +155,9 @@ fn ensure_shortcut() -> Result<(), String> {
     Ok(())
 }
 
+/// Meldung in die Liste der App (Glocke im Popup, Punkt am Tray-Symbol).
 pub fn show(title: &str, body: &str) {
-    let mut n = notify_rust::Notification::new();
-    n.appname("DropCraft").summary(title).body(body);
-    #[cfg(windows)]
-    n.app_id(APP_ID);
-    match n.show() {
-        Ok(_) => *LAST_ERROR.lock().unwrap() = None,
-        Err(e) => {
-            log::warn!("Benachrichtigung fehlgeschlagen: {e}");
-            *LAST_ERROR.lock().unwrap() = Some(e.to_string());
-            // Notlösung: über die Standard-ID (erscheint als „PowerShell“)
-            #[cfg(windows)]
-            {
-                let _ = notify_rust::Notification::new().summary(title).body(body).show();
-            }
-        }
-    }
+    crate::inbox::push(title, body);
 }
 
 #[cfg(test)]

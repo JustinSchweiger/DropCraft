@@ -5,12 +5,14 @@
 mod i18n;
 mod actions;
 mod app;
+mod applog;
 #[cfg(all(windows, feature = "cloud-files"))]
 mod cloudfiles;
 mod config;
 mod folder_icon;
 #[allow(dead_code)]
 mod icons;
+mod inbox;
 mod installer;
 mod notify;
 #[cfg(windows)]
@@ -72,6 +74,7 @@ fn main() -> eframe::Result {
     // Tray, ohne Popup.
     let autostart = args.iter().any(|a| a == "--autostart" || a == "--after-update");
     let share = args.iter().position(|a| a == "--share").and_then(|i| args.get(i + 1)).map(std::path::PathBuf::from);
+    applog::line(&format!("Start {} {:?}", updater::version(), &args[1..]));
     // Nach einem Update: warten, bis die alte Instanz beendet ist.
     if args.iter().any(|a| a == "--after-update") {
         for _ in 0..50 {
@@ -90,12 +93,17 @@ fn main() -> eframe::Result {
     let listener = match TcpListener::bind(("127.0.0.1", INSTANCE_PORT)) {
         Ok(l) => l,
         Err(_) => {
-            // Läuft schon: Fenster zeigen bzw. Freigabe weiterreichen.
+            // Läuft schon: Fenster zeigen bzw. Freigabe weiterreichen. Ein
+            // zweiter Autostart (z. B. doppelter Eintrag) holt nichts nach vorne.
             if let Ok(mut s) = TcpStream::connect(("127.0.0.1", INSTANCE_PORT)) {
-                if let Some(p) = &share {
-                    let _ = std::io::Write::write_all(&mut s, format!("SHARE {}\n", p.display()).as_bytes());
-                }
+                let msg = match &share {
+                    Some(p) => format!("SHARE {}\n", p.display()),
+                    None if autostart => "AUTOSTART\n".to_string(),
+                    None => "SHOW\n".to_string(),
+                };
+                let _ = std::io::Write::write_all(&mut s, msg.as_bytes());
             }
+            applog::line("Läuft schon, an die laufende App weitergegeben");
             return Ok(());
         }
     };

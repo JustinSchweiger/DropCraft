@@ -150,7 +150,9 @@ impl Controls {
         } else {
             (tray::TrayState::Idle, crate::i18n::t("DropCraft – everything synced", "DropCraft – alles synchronisiert").to_string())
         };
-        tray::TrayStatus { state, tooltip, pause_label, open_label: crate::i18n::t("Open DropCraft", "DropCraft öffnen"), quit_label: crate::i18n::t("Quit", "Beenden") }
+        let unread = crate::inbox::unread();
+        let tooltip = if unread > 0 { format!("{tooltip}\n{}", tf!("{unread} new notifications", "{unread} neue Benachrichtigungen")) } else { tooltip };
+        tray::TrayStatus { state, tooltip, pause_label, open_label: crate::i18n::t("Open DropCraft", "DropCraft öffnen"), quit_label: crate::i18n::t("Quit", "Beenden"), unread: unread > 0 }
     }
 }
 
@@ -290,6 +292,8 @@ pub struct App {
     share_requests: Arc<Mutex<Vec<PathBuf>>>,
     confirm_remove: bool,
     update: crate::updater::StatusRef,
+    /// Liste der Benachrichtigungen (Glocke) statt des Tab-Inhalts
+    notes_open: bool,
 }
 
 impl App {
@@ -318,13 +322,25 @@ impl App {
                     let mut line = String::new();
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                     let _ = std::io::Read::read_to_string(&mut stream, &mut line);
+                    let line = line.trim_end();
                     // Installer/Deinstallation: laufende Instanz beenden.
-                    if line.trim_end() == "QUIT" {
+                    if line == "QUIT" {
                         std::process::exit(0);
                     }
-                    if let Some(p) = line.trim_end().strip_prefix("SHARE ") {
+                    // Meldung aus einem anderen Prozess (z. B. „Link kopieren“)
+                    if let Some(json) = line.strip_prefix("NOTE ") {
+                        crate::inbox::receive(json);
+                        continue;
+                    }
+                    if line == "AUTOSTART" {
+                        crate::applog::line("Zweiter Autostart ignoriert");
+                        continue;
+                    }
+                    if let Some(p) = line.strip_prefix("SHARE ") {
                         reqs.lock().unwrap().push(PathBuf::from(p));
                     }
+                    // "SHOW", "SHARE …" oder leer (ältere Versionen)
+                    crate::applog::line(&format!("Popup zeigen: zweiter Start ({})", if line.is_empty() { "ohne Angabe" } else { line }));
                     win.show(&ctx, None);
                 }
             });
@@ -350,7 +366,9 @@ impl App {
         }
 
         let screen = if cfg.accounts.is_empty() { Screen::Form(AccountForm::new(&cfg)) } else { Screen::Main };
+        crate::inbox::init_app(&ctx);
         if !autostart || cfg.accounts.is_empty() || !share_requests.lock().unwrap().is_empty() {
+            crate::applog::line(&format!("Popup zeigen: Start (autostart={autostart}, Konten={})", cfg.accounts.len()));
             win.show(&ctx, None);
         }
 
@@ -369,6 +387,7 @@ impl App {
             share_requests,
             confirm_remove: false,
             update,
+            notes_open: false,
         }
     }
 
@@ -631,16 +650,21 @@ impl App {
         {
             let mut b = ui.new_child(egui::UiBuilder::new().max_rect(body_r).layout(egui::Layout::top_down(egui::Align::Min)));
             b.set_clip_rect(body_r);
-            match self.tab {
+            if self.notes_open {
+                self.notes_panel(&mut b);
+            } else {
+                match self.tab {
                 Tab::Activity => self.activity_tab(&mut b),
                 Tab::Shares => self.shares_tab(&mut b),
                 Tab::Account => self.account_tab(&mut b, &mut action),
                 Tab::Settings => self.settings_tab(&mut b),
+                }
             }
         }
         {
             let mut t = ui.new_child(egui::UiBuilder::new().max_rect(tab_r));
-            if let Some(nt) = tab_bar(&mut t, self.tab) {
+            if let Some(nt) = tab_bar(&mut t, if self.notes_open { None } else { Some(self.tab) }) {
+                self.notes_open = false;
                 self.set_tab(nt);
             }
         }
@@ -680,7 +704,8 @@ impl App {
         let inner = r.shrink2(Vec2::new(12.0, 9.0));
         let pause_r = Rect::from_center_size(Pos2::new(inner.right() - 16.0, inner.center().y), Vec2::splat(32.0));
         let folder_r = pause_r.translate(Vec2::new(-40.0, 0.0));
-        let acc_r = Rect::from_min_max(inner.min, Pos2::new(folder_r.left() - 8.0, inner.max.y));
+        let bell_r = folder_r.translate(Vec2::new(-40.0, 0.0));
+        let acc_r = Rect::from_min_max(inner.min, Pos2::new(bell_r.left() - 8.0, inner.max.y));
 
         let rt = &self.rts[self.selected];
         let phase = rt.shared.lock().unwrap().phase.clone();
@@ -734,12 +759,84 @@ impl App {
             }
         });
 
+        let unread = crate::inbox::unread();
+        let bell_tip = if unread > 0 { tf!("{unread} new notifications", "{unread} neue Benachrichtigungen") } else { t("Notifications", "Benachrichtigungen").to_string() };
+        if icon_button(ui, bell_r, Icon::Bell, &bell_tip, self.notes_open, 0).clicked() {
+            self.notes_open = !self.notes_open;
+        }
+        if unread > 0 {
+            let c = Pos2::new(bell_r.right() - 5.0, bell_r.top() + 5.0);
+            let text = if unread > 9 { "9+".to_string() } else { unread.to_string() };
+            let w = if text.len() > 1 { 18.0 } else { 15.0 };
+            let badge = Rect::from_center_size(c, Vec2::new(w, 15.0));
+            ui.painter().rect_filled(badge, 7.5, DANGER);
+            ui.painter().text(badge.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(9.5), Color32::WHITE);
+        }
         if icon_button(ui, folder_r, Icon::Folder, t("Open folder", "Ordner öffnen"), false, 0).clicked() {
             *action = Some(Action::OpenFolder);
         }
         let (pi, tip) = if paused { (Icon::Play, t("Resume", "Fortsetzen")) } else { (Icon::Pause, t("Pause", "Pausieren")) };
         if icon_button(ui, pause_r, pi, tip, paused, 0).clicked() {
             *action = Some(Action::TogglePause);
+        }
+    }
+
+    // ------------------------------------------------------------ Benachrichtigungen
+
+    fn notes_panel(&mut self, ui: &mut egui::Ui) {
+        // Wer die Liste sieht, hat alles gelesen.
+        crate::inbox::mark_all_read();
+        let notes = crate::inbox::list();
+        let full = ui.max_rect();
+        let mut clear_all = false;
+        let mut clear_link = |ui: &mut egui::Ui| {
+            if ui.link(RichText::new(t("Clear all", "Alle löschen")).size(12.0).color(ACCENT)).clicked() {
+                clear_all = true;
+            }
+        };
+        section_label(ui, t("Notifications", "Benachrichtigungen"), if notes.is_empty() { None } else { Some(&mut clear_link) });
+        if clear_all {
+            crate::inbox::clear();
+            return;
+        }
+        if notes.is_empty() {
+            egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 24)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.vertical_centered(|ui| {
+                    paint_icon(ui, Icon::Bell, TEXT_DIM);
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(t("No notifications", "Keine Benachrichtigungen")).color(TEXT_DIM));
+                });
+            });
+            return;
+        }
+        let mut remove = None;
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            for n in &notes {
+                let top = ui.cursor().top();
+                egui::Frame::new().inner_margin(egui::Margin { left: 12, right: 40, top: 10, bottom: 10 }).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new(&n.title).color(TEXT).strong());
+                    if !n.body.is_empty() {
+                        ui.add(egui::Label::new(RichText::new(&n.body).color(TEXT_DIM)).wrap());
+                    }
+                    ui.label(RichText::new(note_time(n.at)).size(10.5).color(TEXT_DIM));
+                });
+                let bottom = ui.cursor().top();
+                let x = Rect::from_center_size(Pos2::new(full.right() - 22.0, top + 22.0), Vec2::splat(26.0));
+                let resp = ui.interact(x, ui.scope_id().with(("note-x", n.id)), Sense::click());
+                if resp.hovered() {
+                    ui.painter().rect_filled(x, 4.0, RAISED_HOVER);
+                }
+                paint_icon_at(ui.painter(), Rect::from_center_size(x.center(), Vec2::splat(12.0)), Icon::Close, if resp.hovered() { TEXT } else { TEXT_DIM });
+                if resp.on_hover_text(t("Clear", "Löschen")).clicked() {
+                    remove = Some(n.id);
+                }
+                ui.painter().hline(full.x_range(), bottom, Stroke::new(1.0, BORDER));
+            }
+        });
+        if let Some(id) = remove {
+            crate::inbox::remove(id);
         }
     }
 
@@ -1081,10 +1178,9 @@ impl App {
             }
         });
         self.cfg.notifications = n;
-        let err = crate::notify::last_error();
-        setting_row(ui, t("Test notification", "Test-Benachrichtigung"), err.as_deref(), |ui| {
+        setting_row(ui, t("Test notification", "Test-Benachrichtigung"), Some(t("appears under the bell", "erscheint unter der Glocke")), |ui| {
             if ui.link(RichText::new(t("Send", "Senden")).color(ACCENT)).clicked() {
-                std::thread::spawn(|| crate::notify::show("DropCraft", t("This is what notifications look like.", "So sehen Benachrichtigungen aus.")));
+                crate::notify::show("DropCraft", t("This is what notifications look like.", "So sehen Benachrichtigungen aus."));
             }
         });
         // Windows 11: Eintrag „DropCraft“ direkt im Rechtsklick-Menü des Explorers.
@@ -1156,9 +1252,18 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let popup_mode = cfg!(not(target_os = "linux"));
+        // Fenster-Handle nachholen, falls es beim Start noch fehlte.
+        self.win.ensure_handle(frame);
+        // Ist das Fenster sichtbar, obwohl es versteckt sein soll (z. B. von
+        // Windows beim Anmelden gezeigt)? Dann wieder verstecken.
+        if popup_mode && self.win.shown_without_us() {
+            crate::applog::line("Fenster war ohne Aufforderung sichtbar – versteckt");
+            self.win.hide(&ctx);
+            return;
+        }
 
         // Freigabe-Anfragen aus dem Explorer-Rechtsklick
         let reqs: Vec<PathBuf> = std::mem::take(&mut *self.share_requests.lock().unwrap());
@@ -1221,7 +1326,7 @@ fn phase_needs_login(rt: &AccountRt) -> bool {
     rt.shared.lock().unwrap().phase == Phase::NeedsLogin
 }
 
-fn tab_bar(ui: &mut egui::Ui, current: Tab) -> Option<Tab> {
+fn tab_bar(ui: &mut egui::Ui, current: Option<Tab>) -> Option<Tab> {
     let r = ui.max_rect();
     ui.painter().rect_filled(r, 0.0, BG);
     ui.painter().hline(r.x_range(), r.top() + 0.5, Stroke::new(1.0, BORDER));
@@ -1231,7 +1336,7 @@ fn tab_bar(ui: &mut egui::Ui, current: Tab) -> Option<Tab> {
     for (i, (tab, icon, label)) in tabs.into_iter().enumerate() {
         let cell = Rect::from_min_size(Pos2::new(r.left() + i as f32 * w, r.top()), Vec2::new(w, r.height()));
         let resp = ui.interact(cell, ui.scope_id().with(("tab", i)), Sense::click());
-        let on = tab == current;
+        let on = Some(tab) == current;
         let c = if on {
             ACCENT
         } else if resp.hovered() {
@@ -1899,6 +2004,7 @@ enum Icon {
     Logout,
     Power,
     Cloud,
+    Close,
 }
 
 fn paint_icon(ui: &mut egui::Ui, icon: Icon, color: Color32) {
@@ -1979,6 +2085,7 @@ fn paint_icon_at(p: &egui::Painter, r: Rect, icon: Icon, color: Color32) {
             line(&[(6.8, 14.2), (9.2, 14.2)]),
         ],
         Icon::Plus => vec![line(&[(8.0, 3.0), (8.0, 13.0)]), line(&[(3.0, 8.0), (13.0, 8.0)])],
+        Icon::Close => vec![line(&[(3.5, 3.5), (12.5, 12.5)]), line(&[(12.5, 3.5), (3.5, 12.5)])],
         Icon::Logout => vec![line(&[(6.5, 2.5), (2.5, 2.5), (2.5, 13.5), (6.5, 13.5)]), line(&[(10.0, 5.0), (13.0, 8.0), (10.0, 11.0)]), line(&[(13.0, 8.0), (6.0, 8.0)])],
         Icon::Power => vec![arc(8.0, 8.6, 5.4, -PI * 0.3, PI * 1.3), line(&[(8.0, 2.0), (8.0, 7.5)])],
         Icon::Cloud => vec![
@@ -2024,6 +2131,19 @@ mod tests {
         assert_eq!(remote_path(root, std::path::Path::new("/home/j/Andere")), None);
         assert_eq!(remote_path(root, root), None);
         assert_eq!(remote_path(root, std::path::Path::new("/home/j/DropCraft ocv/x.txt")), None);
+    }
+}
+
+/// Zeitpunkt einer Benachrichtigung: heute nur Uhrzeit, sonst Datum.
+fn note_time(at_ms: i64) -> String {
+    let Some(d) = chrono::DateTime::from_timestamp_millis(at_ms) else { return String::new() };
+    let d = d.with_timezone(&chrono::Local);
+    if d.date_naive() == chrono::Local::now().date_naive() {
+        d.format("%H:%M").to_string()
+    } else if crate::i18n::german() {
+        d.format("%d.%m.%Y, %H:%M").to_string()
+    } else {
+        d.format("%Y-%m-%d %H:%M").to_string()
     }
 }
 
